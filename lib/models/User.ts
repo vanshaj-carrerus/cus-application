@@ -1,4 +1,4 @@
-import { Schema, model, models, type Document, type Model } from "mongoose";
+import { Schema, model, models, type Document, type Model, type Types } from "mongoose";
 import { ROLES, type Role } from "./enums";
 
 export interface IUser extends Document {
@@ -10,6 +10,7 @@ export interface IUser extends Document {
   phone?: string;
   isActive: boolean;
   lastLoginAt?: Date;
+  candidateId?: Types.ObjectId; // set when role === "CANDIDATE"; links the login to their Candidate record
   createdAt: Date;
   updatedAt: Date;
 }
@@ -24,6 +25,7 @@ const UserSchema = new Schema<IUser>(
     phone: String,
     isActive: { type: Boolean, default: true },
     lastLoginAt: Date,
+    candidateId: { type: Schema.Types.ObjectId, ref: "Candidate" },
   },
   { timestamps: true }
 );

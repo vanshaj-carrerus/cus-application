@@ -16,3 +16,8 @@ export * from "./Task";
 export * from "./Email";
 export * from "./AiConversation";
 export * from "./AiAction";
+export * from "./JobBoardCredential";
+export * from "./AutoApplyProfile";
+export * from "./ApplicationAttempt";
+export * from "./GmailAccount";
+export * from "./EmailThread";

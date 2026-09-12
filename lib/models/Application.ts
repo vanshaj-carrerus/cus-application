@@ -23,6 +23,8 @@ export interface IApplication extends Document {
   timeline: IApplicationTimelineEntry[];
   automationStatus: AutomationStatus;
   confirmationData?: Record<string, unknown>;
+  applicationProofScreenshot?: string;
+  failureReason?: string;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -50,6 +52,8 @@ const ApplicationSchema = new Schema<IApplication>(
     ],
     automationStatus: { type: String, enum: AUTOMATION_STATUSES, default: "NOT_QUEUED" },
     confirmationData: { type: Schema.Types.Mixed },
+    applicationProofScreenshot: String,
+    failureReason: String,
   },
   { timestamps: true }
 );

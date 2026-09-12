@@ -9,6 +9,11 @@ export const QUEUE_NAMES = {
   email: "email",
   analytics: "analytics",
   notification: "notification",
+  // Auto-apply pipeline
+  jobIngestion: "job-ingestion",
+  resumeTailor: "resume-tailor",
+  playwrightApply: "playwright-apply",
+  emailSync: "email-sync",
 } as const;
 
 type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -39,3 +44,10 @@ export const resumeQueue = () => getQueue(QUEUE_NAMES.resume);
 export const emailQueue = () => getQueue(QUEUE_NAMES.email);
 export const analyticsQueue = () => getQueue(QUEUE_NAMES.analytics);
 export const notificationQueue = () => getQueue(QUEUE_NAMES.notification);
+
+// Auto-apply pipeline: job-ingestion-queue -> resume-tailor-queue -> playwright-apply-queue,
+// with email-sync-queue running independently to poll/react to Gmail replies.
+export const jobIngestionQueue = () => getQueue(QUEUE_NAMES.jobIngestion);
+export const resumeTailorQueue = () => getQueue(QUEUE_NAMES.resumeTailor);
+export const playwrightApplyQueue = () => getQueue(QUEUE_NAMES.playwrightApply);
+export const emailSyncQueue = () => getQueue(QUEUE_NAMES.emailSync);

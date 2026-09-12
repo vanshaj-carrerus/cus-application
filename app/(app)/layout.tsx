@@ -6,6 +6,7 @@ import { Topbar } from "@/components/layout/topbar";
 export default async function AppLayout({ children }: { children: React.ReactNode }) {
   const user = await getCurrentUser();
   if (!user) redirect("/login");
+  if (user.role === "CANDIDATE") redirect("/portal");
 
   return (
     <div className="flex min-h-screen w-full">

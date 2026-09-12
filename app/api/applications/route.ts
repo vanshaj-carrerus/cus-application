@@ -3,7 +3,7 @@ import { withAuth } from "@/lib/api/handler";
 import { connectDB } from "@/lib/db/mongodb";
 import { Application } from "@/lib/models/Application";
 
-export const GET = withAuth(async (req: NextRequest) => {
+export const GET = withAuth(async (req: NextRequest, { user }) => {
   await connectDB();
   const { searchParams } = req.nextUrl;
   const filter: Record<string, unknown> = {};
@@ -11,6 +11,14 @@ export const GET = withAuth(async (req: NextRequest) => {
     const value = searchParams.get(key);
     if (value) filter[key] = value;
   }
+
+  // A candidate can only ever see their own applications — never trust a client-
+  // supplied candidateId for this role, or one candidate could view another's data.
+  if (user.role === "CANDIDATE") {
+    if (!user.candidateId) return NextResponse.json({ applications: [] });
+    filter.candidateId = user.candidateId;
+  }
+
   const applications = await Application.find(filter)
     .populate("candidateId", "name email")
     .populate("jobId", "title company")

@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# generated candidate documents (resumes/cover letters) — contains PII, never commit
+/storage/

@@ -1,5 +1,6 @@
 import { config } from "dotenv";
-config({ path: ".env.local" });
+config({ path: ".env" });
+config({ path: ".env.local", override: true });
 import { connectDB } from "@/lib/db/mongodb";
 import { User } from "@/lib/models/User";
 import { hashPassword } from "@/lib/auth/session";

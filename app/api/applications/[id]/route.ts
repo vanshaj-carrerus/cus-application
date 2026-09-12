@@ -3,10 +3,17 @@ import { withAuth } from "@/lib/api/handler";
 import { connectDB } from "@/lib/db/mongodb";
 import { Application } from "@/lib/models/Application";
 
-export const GET = withAuth(async (_req: NextRequest, { params }) => {
+export const GET = withAuth(async (_req: NextRequest, { params, user }) => {
   await connectDB();
-  const application = await Application.findById(params.id).populate("candidateId").populate("jobId");
+  const application = await Application.findById(params.id).populate("candidateId").populate("jobId").populate("resumeVersionId");
   if (!application) return NextResponse.json({ error: "Application not found" }, { status: 404 });
+
+  // Same ownership check as the list route — a candidate must never be able to
+  // read another candidate's application just by guessing/enumerating an id.
+  if (user.role === "CANDIDATE" && String(application.candidateId._id ?? application.candidateId) !== user.candidateId) {
+    return NextResponse.json({ error: "Application not found" }, { status: 404 });
+  }
+
   return NextResponse.json({ application });
 }, "applications:read");
 

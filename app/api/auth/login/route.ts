@@ -26,7 +26,13 @@ export async function POST(req: NextRequest) {
     user.lastLoginAt = new Date();
     await user.save();
 
-    const token = await signSession({ sub: String(user._id), email: user.email, role: user.role, name: user.name });
+    const token = await signSession({
+      sub: String(user._id),
+      email: user.email,
+      role: user.role,
+      name: user.name,
+      candidateId: user.candidateId ? String(user.candidateId) : undefined,
+    });
 
     const res = NextResponse.json({
       user: { id: user._id, name: user.name, email: user.email, role: user.role },

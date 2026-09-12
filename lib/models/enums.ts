@@ -36,8 +36,10 @@ export const CANDIDATE_STATUSES = [
 export type CandidateStatus = (typeof CANDIDATE_STATUSES)[number];
 
 export const APPLICATION_STATUSES = [
+  "PENDING_MATCHING",
   "DRAFT",
   "PREPARING",
+  "TAILORED",
   "PENDING_APPROVAL",
   "APPROVED",
   "SUBMITTED",
@@ -117,6 +119,44 @@ export const AI_ACTIONS = [
 ] as const;
 export type AiActionType = (typeof AI_ACTIONS)[number];
 
+export const JOB_BOARDS = [
+  "LINKEDIN",
+  "INDEED",
+  "NAUKRI",
+  "DICE",
+  "GLASSDOOR",
+  "MONSTER",
+  "ZIPRECRUITER",
+  "OTHER",
+] as const;
+export type JobBoard = (typeof JOB_BOARDS)[number];
+
+export const CREDENTIAL_STATUSES = ["ACTIVE", "INVALID", "LOCKED", "NEEDS_2FA"] as const;
+export type CredentialStatus = (typeof CREDENTIAL_STATUSES)[number];
+
+export const AUTO_APPLY_MODES = ["AUTO", "REVIEW_FIRST"] as const;
+export type AutoApplyMode = (typeof AUTO_APPLY_MODES)[number];
+
+export const ATTEMPT_STATUSES = [
+  "PENDING",
+  "RUNNING",
+  "SUCCESS",
+  "FAILED",
+  "NEEDS_REVIEW",
+  "BLOCKED_CAPTCHA",
+  "BLOCKED_LOGIN_REQUIRED",
+] as const;
+export type AttemptStatus = (typeof ATTEMPT_STATUSES)[number];
+
+export const GMAIL_ACCOUNT_STATUSES = ["CONNECTED", "DISCONNECTED", "ERROR", "NEEDS_REAUTH"] as const;
+export type GmailAccountStatus = (typeof GMAIL_ACCOUNT_STATUSES)[number];
+
+export const EMAIL_THREAD_STATUSES = ["OPEN", "NEEDS_RESPONSE", "CLOSED"] as const;
+export type EmailThreadStatus = (typeof EMAIL_THREAD_STATUSES)[number];
+
+export const OWNER_TYPES = ["USER", "CANDIDATE"] as const;
+export type OwnerType = (typeof OWNER_TYPES)[number];
+
 // Permission matrix: which roles can perform which actions.
 // Used by lib/auth/rbac.ts as the single source of truth.
 export const PERMISSIONS = {
@@ -137,5 +177,8 @@ export const PERMISSIONS = {
   "admin:manage": ["SUPER_ADMIN", "ADMIN"],
   "clients:read": ["SUPER_ADMIN", "ADMIN", "RECRUITER", "HIRING_MANAGER"],
   "clients:write": ["SUPER_ADMIN", "ADMIN"],
+  "autoapply:manage": ["SUPER_ADMIN", "ADMIN", "RECRUITER"],
+  "gmail:connect": ["SUPER_ADMIN", "ADMIN", "RECRUITER"],
+  "gmail:send": ["SUPER_ADMIN", "ADMIN", "RECRUITER"],
 } as const;
 export type Permission = keyof typeof PERMISSIONS;

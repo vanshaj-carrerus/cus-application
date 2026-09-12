@@ -1,5 +1,12 @@
 import mongoose from "mongoose";
 import { env } from "@/lib/env";
+// Side-effect import: registers every model's schema on this mongoose connection.
+// Without this, whether a .populate("someRef") call works depends on whether some
+// unrelated code path happened to import that specific model file first in this
+// process — a MissingSchemaError trap that's easy to hit intermittently across
+// routes/workers. Importing the whole barrel here once makes registration order
+// a non-issue everywhere connectDB() is called.
+import "@/lib/models";
 
 interface MongooseCache {
   conn: typeof mongoose | null;

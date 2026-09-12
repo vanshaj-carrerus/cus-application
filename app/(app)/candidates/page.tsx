@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Search, Upload } from "lucide-react";
+import { Search, Upload, Plus } from "lucide-react";
 
 interface CandidateRow {
   _id: string;
@@ -64,13 +64,19 @@ export default function CandidatesPage() {
     <div className="mx-auto flex max-w-6xl flex-col gap-4">
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
         <h1 className="text-xl font-semibold text-slate-900">Candidates</h1>
-        <div>
+        <div className="flex gap-2">
           <input ref={fileRef} type="file" accept=".pdf,.doc,.docx" onChange={handleUpload} className="hidden" id="resume-upload" />
           <Button asChild disabled={uploading} variant="secondary">
             <label htmlFor="resume-upload" className="cursor-pointer">
               <Upload className={uploading ? "animate-pulse" : ""} />
               {uploading ? "Parsing resume…" : "Upload Resume"}
             </label>
+          </Button>
+          <Button asChild>
+            <Link href="/candidates/new">
+              <Plus />
+              Add Candidate
+            </Link>
           </Button>
         </div>
       </div>

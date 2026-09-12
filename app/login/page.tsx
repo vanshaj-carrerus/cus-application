@@ -29,7 +29,8 @@ function LoginForm() {
         setError(data.error ?? "Login failed");
         return;
       }
-      router.push(searchParams.get("next") ?? "/dashboard");
+      const fallback = data.user?.role === "CANDIDATE" ? "/portal" : "/dashboard";
+      router.push(searchParams.get("next") ?? fallback);
       router.refresh();
     } finally {
       setLoading(false);
