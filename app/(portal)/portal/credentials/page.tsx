@@ -8,6 +8,8 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { JOB_BOARDS } from "@/lib/models/enums";
 
+const DEFAULT_OPTION = "__default__";
+
 interface CredentialRow {
   board: string;
   hostname?: string;
@@ -16,10 +18,14 @@ interface CredentialRow {
   lastError?: string;
 }
 
+function isDefaultRow(c: CredentialRow) {
+  return c.board === "OTHER" && !c.hostname;
+}
+
 export default function PortalCredentialsPage() {
   const [credentials, setCredentials] = useState<CredentialRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [board, setBoard] = useState<string>(JOB_BOARDS[0]);
+  const [site, setSite] = useState<string>(DEFAULT_OPTION);
   const [hostname, setHostname] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -37,15 +43,24 @@ export default function PortalCredentialsPage() {
     load();
   }, []);
 
+  const hasDefault = credentials.some(isDefaultRow);
+
   async function handleSave(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
     setSaving(true);
     try {
+      const isDefault = site === DEFAULT_OPTION;
       const res = await fetch("/api/portal/credentials", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ board, hostname: board === "OTHER" ? hostname : undefined, boardUsername: username, password }),
+        body: JSON.stringify({
+          isDefault,
+          board: isDefault ? undefined : site,
+          hostname: !isDefault && site === "OTHER" ? hostname : undefined,
+          boardUsername: username,
+          password,
+        }),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -73,10 +88,20 @@ export default function PortalCredentialsPage() {
       <div>
         <h1 className="text-xl font-semibold text-slate-900">Job Board & Application Logins</h1>
         <p className="text-sm text-slate-500">
-          Some applications require signing into a job board, or into the employer&apos;s own application system. Add logins here so the auto-apply worker
-          can sign in on your behalf when it hits one — stored encrypted and never shown back to anyone, including you, after saving.
+          Some applications require signing into a job board, or into the employer&apos;s own application system. Save a{" "}
+          <strong>default login</strong> below and the auto-apply worker will try it anywhere it hits a sign-in wall — you only have to set up one. If a
+          specific platform needs a different email/password, add an override for just that one; it takes priority over the default there.
         </p>
       </div>
+
+      {!hasDefault && !loading && (
+        <Card className="border-amber-200 bg-amber-50">
+          <CardContent className="p-4 text-sm text-amber-800">
+            You don&apos;t have a default login set yet — the worker won&apos;t be able to get past a sign-in wall on any platform you haven&apos;t added
+            individually below.
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader>
@@ -85,16 +110,17 @@ export default function PortalCredentialsPage() {
         <CardContent>
           <form onSubmit={handleSave} className="flex flex-col gap-3">
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-600">Site</label>
-              <select className="h-9 w-full rounded-md border border-slate-200 px-2 text-sm" value={board} onChange={(e) => setBoard(e.target.value)}>
+              <label className="mb-1 block text-xs font-medium text-slate-600">Applies to</label>
+              <select className="h-9 w-full rounded-md border border-slate-200 px-2 text-sm" value={site} onChange={(e) => setSite(e.target.value)}>
+                <option value={DEFAULT_OPTION}>Default — use for every platform unless overridden below</option>
                 {JOB_BOARDS.map((b) => (
                   <option key={b} value={b}>
-                    {b === "OTHER" ? "Other (a specific employer's application site)" : b}
+                    {b === "OTHER" ? "A specific employer's application site (override)" : `${b} (override)`}
                   </option>
                 ))}
               </select>
             </div>
-            {board === "OTHER" && (
+            {site === "OTHER" && (
               <div>
                 <label className="mb-1 block text-xs font-medium text-slate-600">Site domain</label>
                 <Input
@@ -109,8 +135,8 @@ export default function PortalCredentialsPage() {
               </div>
             )}
             <div>
-              <label className="mb-1 block text-xs font-medium text-slate-600">Username / Email</label>
-              <Input value={username} onChange={(e) => setUsername(e.target.value)} required />
+              <label className="mb-1 block text-xs font-medium text-slate-600">Email</label>
+              <Input type="email" value={username} onChange={(e) => setUsername(e.target.value)} required />
             </div>
             <div>
               <label className="mb-1 block text-xs font-medium text-slate-600">Password</label>
@@ -138,7 +164,9 @@ export default function PortalCredentialsPage() {
               {credentials.map((c) => (
                 <div key={`${c.board}-${c.hostname ?? ""}`} className="flex items-center justify-between rounded-md border border-slate-200 p-3">
                   <div>
-                    <div className="text-sm font-medium text-slate-900">{c.board === "OTHER" ? c.hostname : c.board}</div>
+                    <div className="text-sm font-medium text-slate-900">
+                      {isDefaultRow(c) ? "Default (all platforms)" : c.board === "OTHER" ? c.hostname : c.board}
+                    </div>
                     <div className="text-xs text-slate-500">{c.boardUsername}</div>
                     {c.lastError && <div className="text-xs text-red-500">{c.lastError}</div>}
                   </div>

@@ -40,6 +40,8 @@ function candidateExperienceJson(candidate: ICandidate) {
 export async function tailorForJob(candidate: ICandidate, job: IJob): Promise<AiTailorResult> {
   const prompt = `You are an expert resume writer and ATS optimization specialist tailoring a job application. Use ONLY facts present in the candidate profile JSON below — never invent skills, employers, titles, dates, or achievements the candidate doesn't already have. You only reorganize, re-emphasize, and rephrase what is already true.
 
+Write "adjustedSummary" as the candidate speaking about themselves in first person (e.g. "I am a ... with 5 years of experience..."). Never refer to the candidate by name or write about them in third person — do not write "${candidate.name} is..." or "${candidate.name} has...". A resume summary is something the candidate writes about themselves, not something written about them. The cover letter should also read as the candidate's own first-person voice throughout.
+
 CANDIDATE PROFILE (ground truth):
 ${candidateExperienceJson(candidate)}
 
@@ -50,9 +52,9 @@ ${job.description.slice(0, 6000)}
 
 Respond with ONLY a JSON object (no markdown fences, no commentary) with exactly these fields:
 {
-  "adjustedSummary": "a 2-4 sentence resume summary rewritten to emphasize the candidate's real experience most relevant to this job",
+  "adjustedSummary": "a 2-4 sentence resume summary, written in first person as the candidate ('I am...', 'I have...'), rewritten to emphasize the candidate's real experience most relevant to this job",
   "highlightedSkills": ["subset of the candidate's own listed skills only, ordered by relevance to this job's requirements/keywords"],
-  "coverLetter": "a genuine 3-4 paragraph cover letter referencing real details from both the candidate profile and the job description, no placeholder brackets"
+  "coverLetter": "a genuine 3-4 paragraph cover letter in first person, referencing real details from both the candidate profile and the job description, no placeholder brackets"
 }`;
 
   const { data: result } = await runJsonPrompt<AiTailorResult>(prompt);

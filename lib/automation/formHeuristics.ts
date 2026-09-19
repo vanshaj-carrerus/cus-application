@@ -1,5 +1,10 @@
-import type { Page } from "playwright";
+import type { Page, Frame, Locator } from "playwright";
 import type { ICandidate } from "@/lib/models/Candidate";
+
+// Most helpers here work against either a page's main frame or a child iframe —
+// many ATS forms (Greenhouse embeds, some Workday tenants) load the actual form
+// inside an <iframe>, not the top-level document.
+type Interactable = Page | Frame;
 
 type AtsType = "GREENHOUSE" | "LEVER" | "WORKDAY" | "TALEO" | "GENERIC";
 
@@ -55,13 +60,19 @@ const SELECTORS: Record<AtsType, Record<string, string[]>> = {
     phone: ['input[type="tel"]', 'input[name*="phone" i]'],
     linkedin: ['input[name*="linkedin" i]', 'input[placeholder*="linkedin" i]'],
     portfolio: ['input[name*="portfolio" i]', 'input[name*="website" i]'],
-    resumeFile: ['input[type="file"][name*="resume" i]', 'input[type="file"][name*="cv" i]', 'input[type="file"]'],
+    resumeFile: [
+      'input[type="file"][name*="resume" i]',
+      'input[type="file"][name*="cv" i]',
+      'input[type="file"][id*="resume" i]',
+      'input[type="file"][aria-label*="resume" i]',
+      'input[type="file"]',
+    ],
   },
 };
 
-async function fillFirstMatch(page: Page, selectors: string[], value: string): Promise<boolean> {
+async function fillFirstMatch(ctx: Interactable, selectors: string[], value: string): Promise<boolean> {
   for (const selector of selectors) {
-    const locator = page.locator(selector).first();
+    const locator = ctx.locator(selector).first();
     if ((await locator.count()) > 0 && (await locator.isVisible().catch(() => false))) {
       await locator.fill(value).catch(() => undefined);
       return true;
@@ -76,26 +87,64 @@ export interface FormFillResult {
   resumeAttached: boolean;
 }
 
-export async function fillApplicationForm(page: Page, candidate: ICandidate, resumeFilePath: string): Promise<FormFillResult> {
-  const ats = detectAts(page.url());
+/**
+ * True if this frame/page looks like a real application form, not a job-description
+ * page that happens to have a stray input (site search, newsletter signup, cookie
+ * banner). A single field isn't enough evidence on its own — a file input is (a
+ * resume upload basically never appears outside an actual form), otherwise require
+ * at least two meaningful fields together.
+ */
+export async function hasVisibleFormFields(ctx: Interactable): Promise<boolean> {
+  const fileCount = await ctx
+    .locator('input[type="file"]')
+    .count()
+    .catch(() => 0);
+  if (fileCount > 0) return true;
+
+  const meaningfulCount = await ctx
+    .locator(
+      'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"]):not([type="search"]), textarea, select'
+    )
+    .count()
+    .catch(() => 0);
+  return meaningfulCount >= 2;
+}
+
+/**
+ * Picks the frame most likely to hold the actual application form: the main frame
+ * if it has form fields, otherwise the child iframe with the most of them (some ATS
+ * embeds — Greenhouse job boards, certain Workday tenants — load the form in an iframe).
+ */
+export async function findFormContext(page: Page): Promise<Interactable> {
+  if (await hasVisibleFormFields(page)) return page;
+
+  for (const frame of page.frames()) {
+    if (frame === page.mainFrame()) continue;
+    if (await hasVisibleFormFields(frame)) return frame;
+  }
+  return page;
+}
+
+export async function fillApplicationForm(ctx: Interactable, candidate: ICandidate, resumeFilePath: string): Promise<FormFillResult> {
+  const ats = detectAts(ctx.url());
   const fields = SELECTORS[ats];
   const filled: Record<string, boolean> = {};
 
   const [firstName, ...rest] = candidate.name.trim().split(/\s+/);
   const lastName = rest.join(" ") || firstName;
 
-  if (fields.fullName) filled.fullName = await fillFirstMatch(page, fields.fullName, candidate.name);
-  if (fields.firstName) filled.firstName = await fillFirstMatch(page, fields.firstName, firstName);
-  if (fields.lastName) filled.lastName = await fillFirstMatch(page, fields.lastName, lastName);
-  if (fields.email && candidate.email) filled.email = await fillFirstMatch(page, fields.email, candidate.email);
-  if (fields.phone && candidate.phone) filled.phone = await fillFirstMatch(page, fields.phone, candidate.phone);
+  if (fields.fullName) filled.fullName = await fillFirstMatch(ctx, fields.fullName, candidate.name);
+  if (fields.firstName) filled.firstName = await fillFirstMatch(ctx, fields.firstName, firstName);
+  if (fields.lastName) filled.lastName = await fillFirstMatch(ctx, fields.lastName, lastName);
+  if (fields.email && candidate.email) filled.email = await fillFirstMatch(ctx, fields.email, candidate.email);
+  if (fields.phone && candidate.phone) filled.phone = await fillFirstMatch(ctx, fields.phone, candidate.phone);
   // linkedin/portfolio selectors are detected but intentionally left unfilled —
   // ICandidate has no linkedin/portfolio fields, and writing a blank value into a
   // required-format field is worse than leaving it for the candidate to fill in.
 
   let resumeAttached = false;
   for (const selector of fields.resumeFile ?? []) {
-    const locator = page.locator(selector).first();
+    const locator = ctx.locator(selector).first();
     if ((await locator.count()) > 0) {
       await locator.setInputFiles(resumeFilePath).catch(() => undefined);
       resumeAttached = true;
@@ -106,20 +155,100 @@ export async function fillApplicationForm(page: Page, candidate: ICandidate, res
   return { ats, filled, resumeAttached };
 }
 
-export async function findSubmitButton(page: Page) {
-  const candidates = [
-    'button:has-text("Submit Application")',
-    'button:has-text("Submit application")',
-    'button[type="submit"]',
-    'input[type="submit"]',
-    'button:has-text("Submit")',
-    'button:has-text("Apply")',
-  ];
-  for (const selector of candidates) {
-    const locator = page.locator(selector).first();
+async function firstVisibleMatch(ctx: Interactable, selectors: string[]): Promise<Locator | null> {
+  for (const selector of selectors) {
+    const locator = ctx.locator(selector).first();
     if ((await locator.count()) > 0 && (await locator.isVisible().catch(() => false))) {
       return locator;
     }
   }
   return null;
+}
+
+/**
+ * The initial "open the application form" control on a job description/listing
+ * page — distinct from the real submit button. Many career sites' applicationUrl
+ * points at a JD page, not the form itself; this is what gets you from one to the other.
+ */
+export async function findApplyButton(ctx: Interactable): Promise<Locator | null> {
+  return firstVisibleMatch(ctx, [
+    'a:has-text("Apply Now")',
+    'button:has-text("Apply Now")',
+    'a:has-text("Apply for this job")',
+    'button:has-text("Apply for this job")',
+    'a:has-text("Apply to this position")',
+    'button:has-text("Apply to this position")',
+    'a:has-text("Apply")',
+    'button:has-text("Apply")',
+  ]);
+}
+
+/** The terminal control that actually submits the application — never matches "Apply" text. */
+export async function findSubmitButton(ctx: Interactable): Promise<Locator | null> {
+  return firstVisibleMatch(ctx, [
+    'button:has-text("Submit Application")',
+    'button:has-text("Submit application")',
+    'button[type="submit"]',
+    'input[type="submit"]',
+    'button:has-text("Submit")',
+  ]);
+}
+
+/** Advances to the next page of a multi-step application wizard. */
+export async function findNextButton(ctx: Interactable): Promise<Locator | null> {
+  return firstVisibleMatch(ctx, [
+    'button:has-text("Save and Continue")',
+    'button:has-text("Continue")',
+    'button:has-text("Next")',
+    'a:has-text("Next")',
+  ]);
+}
+
+/**
+ * Finds a clickable control (link, button, role=button, submit input) whose visible
+ * text roughly matches `text` — used to click through on a control an AI vision call
+ * identified by its label when the fixed DOM selectors in findApplyButton() didn't
+ * match (icon-only buttons, unusual copy like "I'm Interested", custom components).
+ */
+export async function findClickableByText(ctx: Interactable, text: string): Promise<Locator | null> {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  const exact = ctx.getByRole("button", { name: trimmed, exact: false }).or(ctx.getByRole("link", { name: trimmed, exact: false })).first();
+  if ((await exact.count()) > 0 && (await exact.isVisible().catch(() => false))) return exact;
+
+  const escaped = trimmed.replace(/["\\]/g, "\\$&");
+  const candidate = ctx
+    .locator(`a:has-text("${escaped}"), button:has-text("${escaped}"), [role="button"]:has-text("${escaped}"), input[type="submit"][value*="${escaped}" i]`)
+    .first();
+  if ((await candidate.count()) > 0 && (await candidate.isVisible().catch(() => false))) return candidate;
+
+  return null;
+}
+
+export type PageIntent = "JOB_DETAIL" | "APPLICATION_FORM" | "UNKNOWN";
+
+// Zero-cost URL-based signal, checked before/alongside the DOM field count — a
+// deterministic router so the agent doesn't have to guess where it is from field
+// counts alone. Job description pages ("/careers/senior-engineer") and application
+// forms ("/apply", "/candidate-portal") tend to have distinctly shaped URLs.
+const JOB_DETAIL_URL_PATTERN = /\/(job|jobs|career|careers|posting|postings|opening|openings|position|vacanc(y|ies))(?!.*\/(apply|application))/i;
+const APPLICATION_URL_PATTERN = /\/(apply|application|candidate)/i;
+
+/**
+ * Classifies the current page/frame as a job-description page (needs an Apply
+ * click), an actual application form (needs filling), or unknown — combining the
+ * free URL/DOM signals so this never has to reach for AI just to figure out where
+ * it is. Logged at every loop iteration in applyEngine.ts for visibility.
+ */
+export async function classifyPageIntent(ctx: Interactable): Promise<PageIntent> {
+  if (await hasVisibleFormFields(ctx)) return "APPLICATION_FORM";
+
+  const url = ctx.url().toLowerCase();
+  if (APPLICATION_URL_PATTERN.test(url)) return "APPLICATION_FORM"; // form likely still loading (e.g. into an iframe)
+  if (JOB_DETAIL_URL_PATTERN.test(url)) return "JOB_DETAIL";
+
+  if ((await findApplyButton(ctx)) !== null) return "JOB_DETAIL";
+
+  return "UNKNOWN";
 }

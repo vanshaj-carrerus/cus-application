@@ -1,9 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Trash2 } from "lucide-react";
 
 interface ResumeRow {
   _id: string;
@@ -18,13 +20,36 @@ interface ResumeRow {
 export default function ResumesPage() {
   const [resumes, setResumes] = useState<ResumeRow[]>([]);
   const [loading, setLoading] = useState(true);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    const res = await fetch("/api/resumes");
+    const data = await res.json();
+    setResumes(data.resumes ?? []);
+    setLoading(false);
+  }, []);
 
   useEffect(() => {
-    fetch("/api/resumes")
-      .then((r) => r.json())
-      .then((d) => setResumes(d.resumes ?? []))
-      .finally(() => setLoading(false));
-  }, []);
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- initial data fetch on mount
+    load();
+  }, [load]);
+
+  async function handleDelete(resumeId: string) {
+    if (!confirm("Delete this resume version? This cannot be undone.")) return;
+    setDeletingId(resumeId);
+    try {
+      const res = await fetch(`/api/resumes/${resumeId}`, { method: "DELETE" });
+      if (res.ok) {
+        setResumes((list) => list.filter((r) => r._id !== resumeId));
+      } else {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error ?? "Failed to delete resume");
+      }
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-4">
@@ -52,6 +77,15 @@ export default function ResumesPage() {
                 <div className="flex items-center gap-2">
                   {r.isTailored && <Badge variant="info">Tailored</Badge>}
                   {r.aiQuality?.score != null && <Badge variant="secondary">Quality {r.aiQuality.score}</Badge>}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-slate-400 hover:text-red-600"
+                    disabled={deletingId === r._id}
+                    onClick={() => handleDelete(r._id)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
                 </div>
               </CardContent>
             </Card>

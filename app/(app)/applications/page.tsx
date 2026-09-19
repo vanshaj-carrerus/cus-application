@@ -5,7 +5,9 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Trash2 } from "lucide-react";
 import { APPLICATION_STATUSES } from "@/lib/models/enums";
 
 interface ApplicationRow {
@@ -15,7 +17,38 @@ interface ApplicationRow {
   matchScore?: number;
   candidateId?: { _id: string; name: string };
   jobId?: { title: string; company: string };
+  appliedAt?: string;
   updatedAt: string;
+}
+
+type SortOption = "updated_desc" | "updated_asc" | "applied_desc" | "candidate_asc" | "job_asc";
+
+const SORT_LABELS: Record<SortOption, string> = {
+  updated_desc: "Last activity (newest first)",
+  updated_asc: "Last activity (oldest first)",
+  applied_desc: "Applied date (newest first)",
+  candidate_asc: "Candidate name (A–Z)",
+  job_asc: "Job title (A–Z)",
+};
+
+function sortApplications(list: ApplicationRow[], sortBy: SortOption): ApplicationRow[] {
+  const copy = [...list];
+  switch (sortBy) {
+    case "updated_desc":
+      return copy.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+    case "updated_asc":
+      return copy.sort((a, b) => new Date(a.updatedAt).getTime() - new Date(b.updatedAt).getTime());
+    case "applied_desc":
+      return copy.sort((a, b) => {
+        const bTime = b.appliedAt ? new Date(b.appliedAt).getTime() : 0;
+        const aTime = a.appliedAt ? new Date(a.appliedAt).getTime() : 0;
+        return bTime - aTime;
+      });
+    case "candidate_asc":
+      return copy.sort((a, b) => (a.candidateId?.name ?? "").localeCompare(b.candidateId?.name ?? ""));
+    case "job_asc":
+      return copy.sort((a, b) => (a.jobId?.title ?? "").localeCompare(b.jobId?.title ?? ""));
+  }
 }
 
 interface CandidateOption {
@@ -57,6 +90,8 @@ function ApplicationsPageInner() {
   const [applications, setApplications] = useState<ApplicationRow[]>([]);
   const [candidates, setCandidates] = useState<CandidateOption[]>([]);
   const [loading, setLoading] = useState(true);
+  const [sortBy, setSortBy] = useState<SortOption>("updated_desc");
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -79,6 +114,24 @@ function ApplicationsPageInner() {
       .then((d) => setCandidates(d.candidates ?? []));
   }, []);
 
+  async function handleDelete(e: React.MouseEvent, applicationId: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!confirm("Delete this application? This cannot be undone.")) return;
+    setDeletingId(applicationId);
+    try {
+      const res = await fetch(`/api/applications/${applicationId}`, { method: "DELETE" });
+      if (res.ok) {
+        setApplications((list) => list.filter((a) => a._id !== applicationId));
+      } else {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error ?? "Failed to delete application");
+      }
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   function selectCandidate(value: string) {
     const params = new URLSearchParams(searchParams.toString());
     if (value) params.set("candidateId", value);
@@ -86,9 +139,10 @@ function ApplicationsPageInner() {
     router.push(`/applications?${params.toString()}`);
   }
 
+  const sortedApplications = sortApplications(applications, sortBy);
   const grouped = APPLICATION_STATUSES.map((status) => ({
     status,
-    items: applications.filter((a) => a.status === status),
+    items: sortedApplications.filter((a) => a.status === status),
   })).filter((g) => g.items.length > 0);
 
   const selectedCandidate = candidates.find((c) => c._id === candidateId);
@@ -97,18 +151,31 @@ function ApplicationsPageInner() {
     <div className="mx-auto flex max-w-6xl flex-col gap-4">
       <div className="flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
         <h1 className="text-xl font-semibold text-slate-900">Applications</h1>
-        <select
-          className="h-9 min-w-55 rounded-md border border-slate-200 px-2 text-sm"
-          value={candidateId}
-          onChange={(e) => selectCandidate(e.target.value)}
-        >
-          <option value="">All candidates</option>
-          {candidates.map((c) => (
-            <option key={c._id} value={c._id}>
-              {c.name}
-            </option>
-          ))}
-        </select>
+        <div className="flex gap-2">
+          <select
+            className="h-9 min-w-55 rounded-md border border-slate-200 px-2 text-sm"
+            value={candidateId}
+            onChange={(e) => selectCandidate(e.target.value)}
+          >
+            <option value="">All candidates</option>
+            {candidates.map((c) => (
+              <option key={c._id} value={c._id}>
+                {c.name}
+              </option>
+            ))}
+          </select>
+          <select
+            className="h-9 min-w-55 rounded-md border border-slate-200 px-2 text-sm"
+            value={sortBy}
+            onChange={(e) => setSortBy(e.target.value as SortOption)}
+          >
+            {(Object.keys(SORT_LABELS) as SortOption[]).map((key) => (
+              <option key={key} value={key}>
+                {SORT_LABELS[key]}
+              </option>
+            ))}
+          </select>
+        </div>
       </div>
 
       {selectedCandidate && (
@@ -144,17 +211,33 @@ function ApplicationsPageInner() {
                     <Card className="hover:shadow-md">
                       <CardContent className="flex items-center justify-between p-3">
                         <div className="text-sm">
-                          <span className="font-medium text-slate-900">{a.candidateId?.name ?? "Unknown candidate"}</span>
-                          <span className="text-slate-400"> → </span>
-                          <span className="text-slate-700">
-                            {a.jobId?.title} {a.jobId?.company && `@ ${a.jobId.company}`}
-                          </span>
+                          <div>
+                            <span className="font-medium text-slate-900">{a.candidateId?.name ?? "Unknown candidate"}</span>
+                            <span className="text-slate-400"> → </span>
+                            <span className="text-slate-700">
+                              {a.jobId?.title} {a.jobId?.company && `@ ${a.jobId.company}`}
+                            </span>
+                          </div>
+                          <div className="text-xs text-slate-400">
+                            {a.appliedAt
+                              ? `Applied ${new Date(a.appliedAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`
+                              : `Updated ${new Date(a.updatedAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`}
+                          </div>
                         </div>
                         <div className="flex items-center gap-1.5">
                           {a.automationStatus && a.automationStatus !== "NOT_QUEUED" && (
                             <Badge variant={AUTOMATION_VARIANT[a.automationStatus] ?? "secondary"}>{a.automationStatus.replace(/_/g, " ")}</Badge>
                           )}
                           {a.matchScore != null && <Badge variant="info">{a.matchScore}% match</Badge>}
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-7 w-7 text-slate-400 hover:text-red-600"
+                            disabled={deletingId === a._id}
+                            onClick={(e) => handleDelete(e, a._id)}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
                         </div>
                       </CardContent>
                     </Card>

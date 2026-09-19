@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { RefreshCw, Search } from "lucide-react";
+import { RefreshCw, Search, Trash2 } from "lucide-react";
 
 interface JobRow {
   _id: string;
@@ -28,6 +28,7 @@ export default function JobsPage() {
   const [q, setQ] = useState("");
   const [syncing, setSyncing] = useState(false);
   const [syncQuery, setSyncQuery] = useState("software engineer");
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -43,6 +44,24 @@ export default function JobsPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- initial data fetch on mount
     load();
   }, [load]);
+
+  async function handleDelete(e: React.MouseEvent, jobId: string) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!confirm("Delete this job? This also deletes every application submitted against it. This cannot be undone.")) return;
+    setDeletingId(jobId);
+    try {
+      const res = await fetch(`/api/jobs/${jobId}`, { method: "DELETE" });
+      if (res.ok) {
+        setJobs((list) => list.filter((j) => j._id !== jobId));
+      } else {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error ?? "Failed to delete job");
+      }
+    } finally {
+      setDeletingId(null);
+    }
+  }
 
   async function handleSync() {
     setSyncing(true);
@@ -101,13 +120,22 @@ export default function JobsPage() {
                         {job.company} · {job.location || job.remoteType}
                       </div>
                     </div>
-                    <div className="flex shrink-0 gap-1.5">
+                    <div className="flex shrink-0 items-center gap-1.5">
                       {job.aiScore != null && <Badge variant="info">Quality {job.aiScore}</Badge>}
                       {job.aiDifficulty && (
                         <Badge variant={job.aiDifficulty === "EASY" ? "success" : job.aiDifficulty === "MODERATE" ? "warning" : "danger"}>
                           {job.aiDifficulty.replace("_", " ")}
                         </Badge>
                       )}
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        className="h-7 w-7 text-slate-400 hover:text-red-600"
+                        disabled={deletingId === job._id}
+                        onClick={(e) => handleDelete(e, job._id)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </Button>
                     </div>
                   </div>
                   <div className="flex flex-wrap gap-1">

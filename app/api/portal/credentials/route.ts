@@ -38,19 +38,34 @@ export const POST = withAuth(async (req: NextRequest, { user }) => {
   const denied = requireCandidateSession(user);
   if (denied) return denied;
 
-  const body = (await req.json().catch(() => ({}))) as { board?: string; hostname?: string; boardUsername?: string; password?: string };
-  if (!body.board || !JOB_BOARDS.includes(body.board as JobBoard)) {
-    return NextResponse.json({ error: "A valid board is required" }, { status: 400 });
-  }
-  const board: JobBoard = body.board as JobBoard;
-
-  if (board === "OTHER" && !body.hostname?.trim()) {
-    return NextResponse.json({ error: "A site (hostname) is required for a custom login, e.g. boards.greenhouse.io" }, { status: 400 });
-  }
-  const hostname = board === "OTHER" ? normalizeHostname(body.hostname!) : undefined;
+  const body = (await req.json().catch(() => ({}))) as {
+    isDefault?: boolean;
+    board?: string;
+    hostname?: string;
+    boardUsername?: string;
+    password?: string;
+  };
 
   if (!body.boardUsername || !body.password) {
     return NextResponse.json({ error: "boardUsername and password are required" }, { status: 400 });
+  }
+
+  // The "default" credential is a wildcard: board OTHER with no hostname, used as a
+  // fallback whenever no more specific (named-board or hostname) credential matches.
+  let board: JobBoard;
+  let hostname: string | undefined;
+  if (body.isDefault) {
+    board = "OTHER";
+    hostname = undefined;
+  } else {
+    if (!body.board || !JOB_BOARDS.includes(body.board as JobBoard)) {
+      return NextResponse.json({ error: "A valid board is required" }, { status: 400 });
+    }
+    board = body.board as JobBoard;
+    if (board === "OTHER" && !body.hostname?.trim()) {
+      return NextResponse.json({ error: "A site (hostname) is required for a custom login, e.g. boards.greenhouse.io" }, { status: 400 });
+    }
+    hostname = board === "OTHER" ? normalizeHostname(body.hostname!) : undefined;
   }
 
   await connectDB();

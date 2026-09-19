@@ -145,6 +145,7 @@ export const ATTEMPT_STATUSES = [
   "NEEDS_REVIEW",
   "BLOCKED_CAPTCHA",
   "BLOCKED_LOGIN_REQUIRED",
+  "BLOCKED_OTP_REQUIRED",
 ] as const;
 export type AttemptStatus = (typeof ATTEMPT_STATUSES)[number];
 

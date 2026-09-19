@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useState, useCallback, use } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Sparkles } from "lucide-react";
+import { Sparkles, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { JOB_BOARDS } from "@/lib/models/enums";
 
@@ -72,9 +73,11 @@ const EMPTY_PROFILE: AutoApplyProfileData = {
 
 export default function CandidateDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  const router = useRouter();
   const [candidate, setCandidate] = useState<CandidateDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState<Record<string, string>>({});
@@ -87,7 +90,19 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
   const [ingestMessage, setIngestMessage] = useState<string | null>(null);
 
   const [grantingAccess, setGrantingAccess] = useState(false);
-  const [portalCreds, setPortalCreds] = useState<{ email: string; tempPassword: string } | null>(null);
+  const [portalCreds, setPortalCreds] = useState<{ loginId: string; password: string } | null>(null);
+  const [showPortalPanel, setShowPortalPanel] = useState(false);
+  const [showPortalForm, setShowPortalForm] = useState(false);
+  const [portalForm, setPortalForm] = useState({ loginId: "", password: "" });
+  const [portalError, setPortalError] = useState<string | null>(null);
+  const [portalStatus, setPortalStatus] = useState<{
+    exists: boolean;
+    loginId?: string;
+    isActive?: boolean;
+    lastLoginAt?: string;
+    createdAt?: string;
+  } | null>(null);
+  const [loadingPortalStatus, setLoadingPortalStatus] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -213,14 +228,61 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
     }
   }
 
-  async function grantPortalAccess() {
-    setGrantingAccess(true);
-    setPortalCreds(null);
+  async function handleDelete() {
+    if (
+      !confirm(
+        "Delete this candidate? This also deletes their applications, resumes, auto-apply profile, saved job-board credentials, and portal login. This cannot be undone."
+      )
+    )
+      return;
+    setDeleting(true);
     try {
-      const res = await fetch(`/api/candidates/${id}/portal-access`, { method: "POST" });
+      const res = await fetch(`/api/candidates/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        router.push("/candidates");
+      } else {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error ?? "Failed to delete candidate");
+      }
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  async function openPortalPanel() {
+    setPortalForm({ loginId: candidate?.email ?? "", password: "" });
+    setPortalError(null);
+    setPortalCreds(null);
+    setShowPortalPanel(true);
+    setLoadingPortalStatus(true);
+    try {
+      const res = await fetch(`/api/candidates/${id}/portal-access`);
       const data = await res.json();
-      if (res.ok) setPortalCreds({ email: data.email, tempPassword: data.tempPassword });
-      else alert(data.error ?? "Failed to grant portal access");
+      setPortalStatus(data);
+      setShowPortalForm(!data.exists);
+    } finally {
+      setLoadingPortalStatus(false);
+    }
+  }
+
+  async function grantPortalAccess(e: React.FormEvent) {
+    e.preventDefault();
+    setGrantingAccess(true);
+    setPortalError(null);
+    try {
+      const res = await fetch(`/api/candidates/${id}/portal-access`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ loginId: portalForm.loginId || undefined, password: portalForm.password || undefined }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setPortalCreds({ loginId: data.loginId, password: data.password });
+        setShowPortalForm(false);
+        setPortalStatus({ exists: true, loginId: data.loginId, isActive: true });
+      } else {
+        setPortalError(data.error ?? "Failed to grant portal access");
+      }
     } finally {
       setGrantingAccess(false);
     }
@@ -245,15 +307,90 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
           <Button variant="secondary" onClick={editing ? () => setEditing(false) : startEdit}>
             {editing ? "Cancel" : "Edit Details"}
           </Button>
-          <Button variant="secondary" onClick={grantPortalAccess} disabled={grantingAccess || !candidate.email}>
-            {grantingAccess ? "Granting…" : "Grant Portal Access"}
+          <Button variant="secondary" onClick={showPortalPanel ? () => setShowPortalPanel(false) : openPortalPanel}>
+            {showPortalPanel ? "Cancel" : "Grant Portal Access"}
           </Button>
           <Button onClick={handleAnalyze} disabled={analyzing}>
             <Sparkles className={analyzing ? "animate-pulse" : ""} />
             {analyzing ? "Analyzing…" : candidate.aiProfile ? "Re-analyze with AI" : "Analyze with AI"}
           </Button>
+          <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
+            <Trash2 />
+            {deleting ? "Deleting…" : "Delete"}
+          </Button>
         </div>
       </div>
+
+      {showPortalPanel && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Portal Access</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-3">
+            {loadingPortalStatus && <p className="text-sm text-slate-500">Checking current access…</p>}
+
+            {!loadingPortalStatus && portalStatus?.exists && (
+              <div className="rounded-md border border-slate-200 bg-slate-50 p-3 text-sm text-slate-700">
+                <p className="font-medium text-slate-900">Portal access already set up</p>
+                <p className="mt-1 text-xs text-slate-500">
+                  Login ID: <span className="font-mono">{portalStatus.loginId}</span>
+                  {" · "}
+                  {portalStatus.isActive ? "Active" : "Inactive"}
+                  {portalStatus.lastLoginAt && <> · Last login {new Date(portalStatus.lastLoginAt).toLocaleString()}</>}
+                  {!portalStatus.lastLoginAt && " · Never logged in yet"}
+                </p>
+                <p className="mt-2 text-xs text-slate-400">
+                  The password can&apos;t be retrieved — it&apos;s stored hashed. Reset it below only if the candidate needs a new one.
+                </p>
+                {!showPortalForm && (
+                  <Button variant="outline" size="sm" className="mt-2" onClick={() => setShowPortalForm(true)}>
+                    Reset / Create New Credentials
+                  </Button>
+                )}
+              </div>
+            )}
+
+            {!loadingPortalStatus && portalStatus && !portalStatus.exists && (
+              <p className="text-sm text-slate-500">No portal access set up yet for this candidate. Create credentials below.</p>
+            )}
+
+            {!loadingPortalStatus && showPortalForm && (
+              <form onSubmit={grantPortalAccess} className="flex flex-col gap-3">
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-600">Login ID (email)</label>
+                  <Input
+                    value={portalForm.loginId}
+                    onChange={(e) => setPortalForm((f) => ({ ...f, loginId: e.target.value }))}
+                    placeholder={candidate.email || "candidate@example.com"}
+                  />
+                  <p className="mt-1 text-xs text-slate-400">Leave blank to use the candidate&apos;s on-file email ({candidate.email || "none set"}).</p>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-medium text-slate-600">Password</label>
+                  <Input
+                    type="text"
+                    value={portalForm.password}
+                    onChange={(e) => setPortalForm((f) => ({ ...f, password: e.target.value }))}
+                    placeholder="Leave blank to auto-generate"
+                  />
+                  <p className="mt-1 text-xs text-slate-400">At least 8 characters if set. Shown in plain text here so you can set something memorable.</p>
+                </div>
+                {portalError && <p className="text-xs text-red-600">{portalError}</p>}
+                <div className="flex justify-end gap-2">
+                  {portalStatus?.exists && (
+                    <Button type="button" variant="secondary" onClick={() => setShowPortalForm(false)}>
+                      Cancel
+                    </Button>
+                  )}
+                  <Button type="submit" disabled={grantingAccess}>
+                    {grantingAccess ? "Saving…" : portalStatus?.exists ? "Reset Credentials" : "Grant Access"}
+                  </Button>
+                </div>
+              </form>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {portalCreds && (
         <Card className="border-emerald-200 bg-emerald-50">
@@ -261,14 +398,11 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
             <CardTitle className="text-emerald-800">Portal Access Granted</CardTitle>
           </CardHeader>
           <CardContent className="text-sm text-emerald-800">
-            <p>
-              Share these login details with the candidate — this password is shown only once and cannot be retrieved again (running this again generates a
-              new one).
-            </p>
+            <p>Share these login details with the candidate — the password is shown only once and cannot be retrieved again (granting access again sets a new one).</p>
             <p className="mt-2 font-mono text-xs">
-              Email: {portalCreds.email}
+              Login ID: {portalCreds.loginId}
               <br />
-              Temp password: {portalCreds.tempPassword}
+              Password: {portalCreds.password}
             </p>
           </CardContent>
         </Card>

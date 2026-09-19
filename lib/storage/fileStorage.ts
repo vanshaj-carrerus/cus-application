@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { mkdir, readFile, writeFile, unlink } from "fs/promises";
 import path from "path";
 import { randomUUID } from "crypto";
 
@@ -39,6 +39,16 @@ function resolveStoredPath(key: string): string {
 
 export async function readStoredFile(key: string): Promise<Buffer> {
   return readFile(resolveStoredPath(key));
+}
+
+/** Best-effort delete — a missing file (already gone, or never a local key) is not an error here. */
+export async function deleteStoredFile(urlOrKey: string): Promise<void> {
+  const key = urlOrKey.startsWith("/api/files/") ? urlOrKey.slice("/api/files/".length) : urlOrKey;
+  try {
+    await unlink(resolveStoredPath(key));
+  } catch {
+    // ignore — nothing more we can do, and this shouldn't block the DB delete
+  }
 }
 
 /** Absolute filesystem path for a stored file, e.g. to hand to Playwright's setInputFiles(). */

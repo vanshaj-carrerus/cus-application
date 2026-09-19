@@ -79,6 +79,8 @@ export async function tailorResume(candidateId: string, jobId: string, opts: { u
 
   const prompt = `Rewrite and reorganize the following resume to emphasize the experience most relevant to the target job. You may NOT invent companies, skills, experience, education, certifications, achievements, dates, or job titles that are not already present in the source resume. You may only reorder, re-emphasize, and rephrase truthful existing content.
 
+Write as the candidate speaking about themselves in first person (e.g. "I led...", "I managed..."). Never refer to the candidate by name or in third person (e.g. never write "${candidate.name} is..." or "${candidate.name} has..."). A resume is something the candidate writes about themselves, not something written about them.
+
 SOURCE RESUME (ground truth — do not add facts beyond this):
 ${candidate.resumeText.slice(0, 8000)}
 

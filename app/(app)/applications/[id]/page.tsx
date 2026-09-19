@@ -1,10 +1,13 @@
 "use client";
 
 import { useEffect, useState, useCallback, use } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Trash2 } from "lucide-react";
 import { APPLICATION_STATUSES } from "@/lib/models/enums";
 
 interface ApplicationDetail {
@@ -65,14 +68,17 @@ const ATTEMPT_STATUS_VARIANT: Record<string, "default" | "secondary" | "outline"
   NEEDS_REVIEW: "warning",
   BLOCKED_CAPTCHA: "warning",
   BLOCKED_LOGIN_REQUIRED: "warning",
+  BLOCKED_OTP_REQUIRED: "warning",
 };
 
 export default function ApplicationDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  const router = useRouter();
   const [app, setApp] = useState<ApplicationDetail | null>(null);
   const [attempts, setAttempts] = useState<Attempt[]>([]);
   const [loading, setLoading] = useState(true);
   const [updating, setUpdating] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -103,16 +109,45 @@ export default function ApplicationDetailPage({ params }: { params: Promise<{ id
     }
   }
 
+  async function handleDelete() {
+    if (!confirm("Delete this application? This cannot be undone.")) return;
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/applications/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        router.push("/applications");
+      } else {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error ?? "Failed to delete application");
+      }
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   if (loading) return <Skeleton className="h-96 w-full max-w-3xl" />;
   if (!app) return <p className="text-sm text-slate-500">Application not found.</p>;
 
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-4">
-      <div>
-        <h1 className="text-xl font-semibold text-slate-900">
-          {app.candidateId?.name} → {app.jobId?.title}
-        </h1>
-        <p className="text-sm text-slate-500">{app.jobId?.company}</p>
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-xl font-semibold text-slate-900">
+            {app.candidateId?._id ? (
+              <Link href={`/candidates/${app.candidateId._id}`} className="hover:underline">
+                {app.candidateId.name}
+              </Link>
+            ) : (
+              app.candidateId?.name
+            )}{" "}
+            → {app.jobId?.title}
+          </h1>
+          <p className="text-sm text-slate-500">{app.jobId?.company}</p>
+        </div>
+        <Button variant="destructive" size="sm" onClick={handleDelete} disabled={deleting}>
+          <Trash2 />
+          {deleting ? "Deleting…" : "Delete"}
+        </Button>
       </div>
 
       <Card>

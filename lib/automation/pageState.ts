@@ -21,6 +21,23 @@ export async function detectAuthWall(page: Page): Promise<boolean> {
 }
 
 /**
+ * Detects a one-time-code / 2FA verification prompt. This is intentionally
+ * detect-only, same as CAPTCHA: an OTP exists to prove a human is present at
+ * that moment, and reading a candidate's personal inbox to auto-fetch and submit
+ * one would defeat that on their behalf. Hitting this always means stop and hand
+ * off to the candidate, never attempt to solve it.
+ */
+export async function detectOtpWall(page: Page): Promise<boolean> {
+  const otpFieldCount = await page.locator('input[autocomplete="one-time-code"], input[name*="otp" i], input[name*="verification" i]').count();
+  if (otpFieldCount > 0) return true;
+
+  const bodyText = await page.locator("body").innerText().catch(() => "");
+  return /enter the (code|verification code|otp)|we('ve| have) sent (a code|a verification code|an otp)|check your email for a code|two-factor authentication|verify your identity/i.test(
+    bodyText
+  );
+}
+
+/**
  * Detects an actual submission confirmation (URL or page text). Clicking a button
  * that matches "submit" heuristics is not evidence anything was submitted — some
  * forms silently reject the click (validation failure, unfilled required field,

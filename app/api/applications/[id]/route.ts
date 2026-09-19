@@ -2,6 +2,7 @@ import { NextResponse, type NextRequest } from "next/server";
 import { withAuth } from "@/lib/api/handler";
 import { connectDB } from "@/lib/db/mongodb";
 import { Application } from "@/lib/models/Application";
+import { ApplicationAttempt } from "@/lib/models/ApplicationAttempt";
 
 export const GET = withAuth(async (_req: NextRequest, { params, user }) => {
   await connectDB();
@@ -40,4 +41,15 @@ export const PATCH = withAuth(async (req: NextRequest, { params, user }) => {
 
   await application.save();
   return NextResponse.json({ application });
+}, "applications:write");
+
+export const DELETE = withAuth(async (_req: NextRequest, { params }) => {
+  await connectDB();
+  const application = await Application.findById(params.id);
+  if (!application) return NextResponse.json({ error: "Application not found" }, { status: 404 });
+
+  await ApplicationAttempt.deleteMany({ applicationId: application._id });
+  await application.deleteOne();
+
+  return NextResponse.json({ deleted: true });
 }, "applications:write");

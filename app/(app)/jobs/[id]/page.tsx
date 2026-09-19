@@ -1,11 +1,12 @@
 "use client";
 
 import { useEffect, useState, useCallback, use } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Sparkles } from "lucide-react";
+import { Sparkles, Trash2 } from "lucide-react";
 
 interface JobDetail {
   _id: string;
@@ -34,9 +35,11 @@ interface JobDetail {
 
 export default function JobDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  const router = useRouter();
   const [job, setJob] = useState<JobDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [analyzing, setAnalyzing] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -61,6 +64,22 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
     }
   }
 
+  async function handleDelete() {
+    if (!confirm("Delete this job? This also deletes every application submitted against it. This cannot be undone.")) return;
+    setDeleting(true);
+    try {
+      const res = await fetch(`/api/jobs/${id}`, { method: "DELETE" });
+      if (res.ok) {
+        router.push("/jobs");
+      } else {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error ?? "Failed to delete job");
+      }
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   if (loading) return <Skeleton className="h-96 w-full max-w-4xl" />;
   if (!job) return <p className="text-sm text-slate-500">Job not found.</p>;
 
@@ -73,10 +92,16 @@ export default function JobDetailPage({ params }: { params: Promise<{ id: string
             {job.company} · {job.location || job.remoteType}
           </p>
         </div>
-        <Button onClick={handleAnalyze} disabled={analyzing}>
-          <Sparkles className={analyzing ? "animate-pulse" : ""} />
-          {analyzing ? "Analyzing…" : job.aiAnalysis ? "Re-analyze with AI" : "Analyze with AI"}
-        </Button>
+        <div className="flex gap-2">
+          <Button onClick={handleAnalyze} disabled={analyzing}>
+            <Sparkles className={analyzing ? "animate-pulse" : ""} />
+            {analyzing ? "Analyzing…" : job.aiAnalysis ? "Re-analyze with AI" : "Analyze with AI"}
+          </Button>
+          <Button variant="destructive" onClick={handleDelete} disabled={deleting}>
+            <Trash2 />
+            {deleting ? "Deleting…" : "Delete"}
+          </Button>
+        </div>
       </div>
 
       {job.aiAnalysis?.summary && (
