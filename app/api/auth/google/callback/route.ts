@@ -7,8 +7,8 @@ import { GmailAccount } from "@/lib/models/GmailAccount";
 import { encryptSecret } from "@/lib/security/crypto";
 import { startGmailWatch } from "@/lib/services/gmailWatchService";
 
-function redirectToSettings(req: NextRequest, status: "connected" | "error", message?: string) {
-  const url = new URL("/settings", req.url);
+function redirectTo(req: NextRequest, path: string, status: "connected" | "error", message?: string) {
+  const url = new URL(path, req.url);
   url.searchParams.set("gmail", status);
   if (message) url.searchParams.set("gmail_error", message);
   return NextResponse.redirect(url);
@@ -22,23 +22,32 @@ export async function GET(req: NextRequest) {
   const state = req.nextUrl.searchParams.get("state");
   const oauthError = req.nextUrl.searchParams.get("error");
 
-  if (oauthError) return redirectToSettings(req, "error", oauthError);
-  if (!code || !state) return redirectToSettings(req, "error", "missing_code_or_state");
+  // Both the HR settings flow and the candidate portal flow redirect through this
+  // same callback, since only one GOOGLE_REDIRECT_URI is registered with Google —
+  // the signed state's purpose tells them apart.
+  const isCandidateFlow = user.role === "CANDIDATE" && !!user.candidateId;
+  const returnPath = isCandidateFlow ? "/portal/gmail" : "/settings";
 
-  const stateUserId = await verifyOAuthState(state, "gmail_connect");
+  if (oauthError) return redirectTo(req, returnPath, "error", oauthError);
+  if (!code || !state) return redirectTo(req, returnPath, "error", "missing_code_or_state");
+
+  const stateUserId = await verifyOAuthState(state, isCandidateFlow ? "candidate_gmail_connect" : "gmail_connect");
   if (!stateUserId || stateUserId !== user.sub) {
-    return redirectToSettings(req, "error", "invalid_state");
+    return redirectTo(req, returnPath, "error", "invalid_state");
   }
 
   try {
     const tokens = await exchangeCodeForTokens(code);
     await connectDB();
 
+    const ownerType = isCandidateFlow ? "CANDIDATE" : "USER";
+    const ownerId = isCandidateFlow ? user.candidateId! : user.sub;
+
     const account = await GmailAccount.findOneAndUpdate(
-      { ownerType: "USER", ownerId: user.sub },
+      { ownerType, ownerId },
       {
-        ownerType: "USER",
-        ownerId: user.sub,
+        ownerType,
+        ownerId,
         emailAddress: tokens.emailAddress,
         accessTokenEncrypted: encryptSecret(tokens.accessToken),
         refreshTokenEncrypted: encryptSecret(tokens.refreshToken),
@@ -59,8 +68,8 @@ export async function GET(req: NextRequest) {
       await account.save();
     }
 
-    return redirectToSettings(req, "connected");
+    return redirectTo(req, returnPath, "connected");
   } catch (err) {
-    return redirectToSettings(req, "error", err instanceof Error ? err.message : "unknown_error");
+    return redirectTo(req, returnPath, "error", err instanceof Error ? err.message : "unknown_error");
   }
 }

@@ -8,7 +8,7 @@ import { AutoApplyProfile } from "@/lib/models/AutoApplyProfile";
 import { ApplicationAttempt, type IApplicationAttempt } from "@/lib/models/ApplicationAttempt";
 import { storedFilePath } from "@/lib/storage/fileStorage";
 import { openApplySession, closeApplySession, persistSession, detectBoardFromUrl } from "@/lib/automation/browser";
-import { detectCaptcha } from "@/lib/automation/captcha";
+import { detectCaptcha, solveCaptcha } from "@/lib/automation/captcha";
 import { detectAuthWall, detectOtpWall, detectSuccessConfirmation } from "@/lib/automation/pageState";
 import { attemptAutoLogin, attemptAutoSignup } from "@/lib/automation/authLogin";
 import {
@@ -128,17 +128,23 @@ export async function runApplyFlow(applicationId: string) {
 
   /**
    * Runs the captcha / OTP / login-wall checks, in that order, against the current
-   * page. Attempts an automatic login if a saved credential matches (see
-   * lib/automation/authLogin.ts) — everything else here is detect-only and hands
-   * off to a human rather than trying to solve it.
+   * page. Attempts to automatically solve any detected CAPTCHA challenge (see
+   * lib/automation/captcha.ts) and attempts an automatic login if a saved credential matches
+   * (see lib/automation/authLogin.ts).
    */
   async function checkWalls(page: Page, stepPrefix: string): Promise<{ blocked: boolean; reason?: string; attemptStatus?: "BLOCKED_CAPTCHA" | "BLOCKED_OTP_REQUIRED" | "BLOCKED_LOGIN_REQUIRED" }> {
     if (await detectCaptcha(page)) {
-      const reason = "CAPTCHA challenge detected — auto-solving is intentionally not supported";
-      await addStep(attempt, `${stepPrefix}_captcha`, "FAILED", reason);
-      return { blocked: true, reason, attemptStatus: "BLOCKED_CAPTCHA" };
+      const solveResult = await solveCaptcha(page);
+      if (solveResult.solved) {
+        await addStep(attempt, `${stepPrefix}_captcha`, "SUCCESS", `CAPTCHA detected and solved automatically (${solveResult.method}): ${solveResult.message}`);
+      } else {
+        const reason = `CAPTCHA challenge detected and auto-solve failed: ${solveResult.message}`;
+        await addStep(attempt, `${stepPrefix}_captcha`, "FAILED", reason);
+        return { blocked: true, reason, attemptStatus: "BLOCKED_CAPTCHA" };
+      }
+    } else {
+      await addStep(attempt, `${stepPrefix}_captcha`, "SUCCESS", "No CAPTCHA detected");
     }
-    await addStep(attempt, `${stepPrefix}_captcha`, "SUCCESS", "No CAPTCHA detected");
 
     if (await detectOtpWall(page)) {
       const reason = "Verification-code prompt detected — this is never auto-solved";

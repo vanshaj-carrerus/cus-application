@@ -55,6 +55,9 @@ export const env = {
   get openrouterApiKey() {
     return process.env.OPENROUTER_API_KEY;
   },
+  get captchaApiKey() {
+    return process.env.CAPTCHA_API_KEY;
+  },
   get googleClientId() {
     return required("GOOGLE_CLIENT_ID");
   },

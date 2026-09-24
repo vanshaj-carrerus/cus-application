@@ -25,6 +25,9 @@ export default async function PortalLayout({ children }: { children: React.React
           <Link href="/portal/credentials" className="py-3 hover:text-slate-900">
             Job Board Logins
           </Link>
+          <Link href="/portal/gmail" className="py-3 hover:text-slate-900">
+            Email Access
+          </Link>
         </nav>
       </div>
       <main className="flex-1 overflow-y-auto p-4 md:p-6">{children}</main>
