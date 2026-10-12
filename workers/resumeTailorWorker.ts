@@ -11,6 +11,6 @@ export function startResumeTailorWorker() {
       return tailorApplicationForJob(applicationId);
     },
     // Renders a headless-Chromium PDF per job — keep concurrency low to bound memory.
-    { connection: getRedisConnection(), concurrency: 1 }
+    { connection: getRedisConnection(), concurrency: Number(process.env.TAILOR_CONCURRENCY) || 1 }
   );
 }

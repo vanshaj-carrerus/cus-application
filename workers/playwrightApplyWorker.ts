@@ -11,6 +11,6 @@ export function startPlaywrightApplyWorker() {
       return runApplyFlow(applicationId);
     },
     // Each job drives a real headless browser end to end — keep concurrency low.
-    { connection: getRedisConnection(), concurrency: 1 }
+    { connection: getRedisConnection(), concurrency: Number(process.env.APPLY_CONCURRENCY) || 1 }
   );
 }

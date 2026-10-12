@@ -1,0 +1,30 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD}", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    # Only expose publicly if other servers/Vercel must enqueue; firewall to known IPs.
+    ports:
+      - "6379:6379"
+
+  workers:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    restart: unless-stopped
+    depends_on:
+      - redis
+    env_file: .env
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
+      APPLY_CONCURRENCY: ${APPLY_CONCURRENCY:-4}
+      TAILOR_CONCURRENCY: ${TAILOR_CONCURRENCY:-2}
+    shm_size: "1gb"   # Chromium crashes with the default 64MB /dev/shm
+    init: true
+    volumes:
+      - ./storage:/app/storage
+
+volumes:
+  redis-data:

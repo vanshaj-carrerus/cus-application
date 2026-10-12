@@ -3,7 +3,8 @@ import { randomBytes } from "crypto";
 import { JobBoardCredential, type IJobBoardCredential } from "@/lib/models/JobBoardCredential";
 import { decryptSecret, encryptSecret } from "@/lib/security/crypto";
 import { detectBoardFromUrl } from "@/lib/automation/browser";
-import { detectAuthWall } from "@/lib/automation/pageState";
+import { detectAuthWall, detectOtpWall } from "@/lib/automation/pageState";
+import { fetchVerificationCode } from "@/lib/automation/otpRetriever";
 
 const LOGIN_TIMEOUT_MS = 15_000;
 
@@ -237,4 +238,79 @@ export async function attemptAutoSignup(
   }
 
   return { attempted: true, success, loginId: candidate.email };
+}
+
+const OTP_INPUT_SELECTORS = [
+  'input[autocomplete="one-time-code"]',
+  'input[name*="otp" i]',
+  'input[name*="verification" i]',
+  'input[name*="code" i]',
+  'input[inputmode="numeric"]',
+];
+
+const OTP_SUBMIT_SELECTORS = [
+  'button:has-text("Verify")',
+  'button:has-text("Confirm")',
+  'button:has-text("Continue")',
+  'button:has-text("Submit")',
+  'button[type="submit"]',
+  'input[type="submit"]',
+];
+
+export interface OtpChallengeResult {
+  attempted: boolean;
+  success: boolean;
+  from?: string;
+}
+
+/**
+ * Clears an email-verification (one-time-code) step by reading the code from the
+ * candidate's own OAuth-connected inbox and submitting it. This runs only after a
+ * signup/login the automation just performed on the candidate's behalf, so the code
+ * we wait for is the one that flow just triggered. Handles both a single code field
+ * and the split one-box-per-digit layout many portals use.
+ */
+export async function attemptOtpChallenge(page: Page, candidateId: string): Promise<OtpChallengeResult> {
+  let host: string;
+  try {
+    host = new URL(page.url()).hostname.toLowerCase();
+  } catch {
+    return { attempted: false, success: false };
+  }
+
+  const otpInputs = page.locator(OTP_INPUT_SELECTORS.join(", "));
+  const inputCount = await otpInputs.count();
+  if (inputCount === 0) return { attempted: false, success: false };
+
+  // The code was sent when we submitted the signup/login moments ago; look a few
+  // minutes back so a code that landed just before we detected the prompt still counts.
+  const since = new Date(Date.now() - 3 * 60_000);
+  const { code, from } = await fetchVerificationCode({ candidateId, targetHost: host, since });
+  if (!code) return { attempted: true, success: false };
+
+  if (inputCount > 1 && inputCount >= code.length) {
+    // One box per character.
+    for (let i = 0; i < code.length; i++) {
+      await otpInputs.nth(i).fill(code[i]).catch(() => undefined);
+    }
+  } else {
+    await otpInputs.first().fill(code).catch(() => undefined);
+  }
+
+  let clicked = false;
+  for (const selector of OTP_SUBMIT_SELECTORS) {
+    const locator = page.locator(selector).first();
+    if ((await locator.count()) > 0 && (await locator.isVisible().catch(() => false))) {
+      await Promise.allSettled([page.waitForLoadState("networkidle", { timeout: LOGIN_TIMEOUT_MS }), locator.click()]);
+      clicked = true;
+      break;
+    }
+  }
+  if (!clicked) {
+    await otpInputs.last().press("Enter").catch(() => undefined);
+    await page.waitForLoadState("networkidle", { timeout: LOGIN_TIMEOUT_MS }).catch(() => undefined);
+  }
+
+  const stillOtp = await detectOtpWall(page);
+  return { attempted: true, success: !stillOtp, from };
 }

@@ -1,0 +1,12 @@
+# Background workers (BullMQ + Playwright). Browsers and system deps come preinstalled.
+FROM mcr.microsoft.com/playwright:v1.63.0-noble
+
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+
+CMD ["npx", "tsx", "workers/start.ts"]

@@ -15,7 +15,7 @@ function detectAts(url: string): AtsType {
   if (host.includes("myworkdayjobs.com") || host.includes("workday.com")) return "WORKDAY";
   if (host.includes("taleo.net")) return "TALEO";
   return "GENERIC";
-}
+};
 
 // Ordered candidate selectors per field, per known ATS. First visible match wins.
 // Falls through to GENERIC's label/placeholder/attribute heuristics for anything

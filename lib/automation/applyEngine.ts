@@ -10,7 +10,7 @@ import { storedFilePath } from "@/lib/storage/fileStorage";
 import { openApplySession, closeApplySession, persistSession, detectBoardFromUrl } from "@/lib/automation/browser";
 import { detectCaptcha, solveCaptcha } from "@/lib/automation/captcha";
 import { detectAuthWall, detectOtpWall, detectSuccessConfirmation } from "@/lib/automation/pageState";
-import { attemptAutoLogin, attemptAutoSignup } from "@/lib/automation/authLogin";
+import { attemptAutoLogin, attemptAutoSignup, attemptOtpChallenge } from "@/lib/automation/authLogin";
 import {
   fillApplicationForm,
   findApplyButton,
@@ -27,7 +27,7 @@ import type { Page } from "playwright";
 
 const NAVIGATION_TIMEOUT_MS = 30_000;
 const MAX_OPEN_FORM_ATTEMPTS = 2; // clicks on a "job description" page trying to reach the real form
-const MAX_WIZARD_STEPS = 6; // bound on a multi-page application (info -> experience -> resume -> review -> submit)
+const MAX_WIZARD_STEPS = 6; // bound on a multi-page application (info -> experience -> resume -> review -> submit);
 const MAX_AI_REVIEW_ATTEMPTS = 3; // how many times to retry before an unresolved outcome becomes FAILED
 
 async function addStep(
@@ -146,17 +146,43 @@ export async function runApplyFlow(applicationId: string) {
       await addStep(attempt, `${stepPrefix}_captcha`, "SUCCESS", "No CAPTCHA detected");
     }
 
-    if (await detectOtpWall(page)) {
-      const reason = "Verification-code prompt detected — this is never auto-solved";
+    // Resolves an email-verification prompt by fetching the code from the candidate's
+    // own connected inbox and submitting it. Returns handled=false when no prompt is
+    // present, so the caller can log the "no prompt" step and re-run it after an
+    // auth step that itself triggers a code. Only the account owner's connected
+    // mailbox is ever read (see lib/automation/otpRetriever.ts).
+    const resolveOtp = async (): Promise<{ handled: boolean; blocked: boolean; reason?: string; attemptStatus?: "BLOCKED_OTP_REQUIRED" }> => {
+      if (!(await detectOtpWall(page))) return { handled: false, blocked: false };
+
+      const otpResult = await attemptOtpChallenge(page, String(cand._id));
+      if (otpResult.success) {
+        await addStep(
+          attempt,
+          `${stepPrefix}_otp`,
+          "SUCCESS",
+          `Verification code retrieved from the candidate's connected inbox${otpResult.from ? ` (sender ${otpResult.from})` : ""} and submitted automatically`
+        );
+        return { handled: true, blocked: false };
+      }
+
+      const reason = otpResult.attempted
+        ? "Verification-code prompt detected — no matching code arrived in the candidate's connected inbox within the wait window (or no Gmail is connected for this candidate)"
+        : "Verification-code prompt detected but no code field could be read on the page";
       await addStep(attempt, `${stepPrefix}_otp`, "FAILED", reason);
-      return { blocked: true, reason, attemptStatus: "BLOCKED_OTP_REQUIRED" };
-    }
-    await addStep(attempt, `${stepPrefix}_otp`, "SUCCESS", "No verification-code prompt detected");
+      return { handled: true, blocked: true, reason, attemptStatus: "BLOCKED_OTP_REQUIRED" };
+    };
+
+    const otpBefore = await resolveOtp();
+    if (otpBefore.blocked) return { blocked: true, reason: otpBefore.reason, attemptStatus: otpBefore.attemptStatus };
+    if (!otpBefore.handled) await addStep(attempt, `${stepPrefix}_otp`, "SUCCESS", "No verification-code prompt detected");
 
     if (await detectAuthWall(page)) {
       const loginResult = await attemptAutoLogin(page, String(cand._id));
       if (loginResult.success) {
         await addStep(attempt, `${stepPrefix}_auth`, "SUCCESS", `Logged in automatically using saved ${loginResult.credentialLabel} credentials`);
+        // A sign-in can trigger a 2FA/email code — clear it before moving on.
+        const otpAfterLogin = await resolveOtp();
+        if (otpAfterLogin.blocked) return { blocked: true, reason: otpAfterLogin.reason, attemptStatus: otpAfterLogin.attemptStatus };
         return { blocked: false };
       }
 
@@ -172,6 +198,9 @@ export async function runApplyFlow(applicationId: string) {
       const signupResult = await attemptAutoSignup(page, String(cand._id), { name: cand.name, email: cand.email, phone: cand.phone });
       if (signupResult.success) {
         await addStep(attempt, `${stepPrefix}_auth`, "SUCCESS", `Registered a new account automatically (${signupResult.loginId}) and saved the credentials`);
+        // New signups almost always send an email verification code — clear it here.
+        const otpAfterSignup = await resolveOtp();
+        if (otpAfterSignup.blocked) return { blocked: true, reason: otpAfterSignup.reason, attemptStatus: otpAfterSignup.attemptStatus };
         return { blocked: false };
       }
 

@@ -21,11 +21,12 @@ export async function detectAuthWall(page: Page): Promise<boolean> {
 }
 
 /**
- * Detects a one-time-code / 2FA verification prompt. This is intentionally
- * detect-only, same as CAPTCHA: an OTP exists to prove a human is present at
- * that moment, and reading a candidate's personal inbox to auto-fetch and submit
- * one would defeat that on their behalf. Hitting this always means stop and hand
- * off to the candidate, never attempt to solve it.
+ * Detects a one-time-code / email-verification prompt. The apply flow resolves it
+ * by reading the code from the candidate's own OAuth-connected inbox and submitting
+ * it (see lib/automation/otpRetriever.ts + attemptOtpChallenge) — this is the account
+ * owner retrieving their own code via the agent they authorized at /portal/gmail, not
+ * a bypass. It only ever falls back to human hand-off when no matching code arrives
+ * in the wait window or the candidate has no Gmail connected.
  */
 export async function detectOtpWall(page: Page): Promise<boolean> {
   const otpFieldCount = await page.locator('input[autocomplete="one-time-code"], input[name*="otp" i], input[name*="verification" i]').count();
@@ -35,7 +36,7 @@ export async function detectOtpWall(page: Page): Promise<boolean> {
   return /enter the (code|verification code|otp)|we('ve| have) sent (a code|a verification code|an otp)|check your email for a code|two-factor authentication|verify your identity/i.test(
     bodyText
   );
-}
+};
 
 /**
  * Detects an actual submission confirmation (URL or page text). Clicking a button
