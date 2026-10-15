@@ -6,7 +6,7 @@ import { Resume } from "@/lib/models/Resume";
 import { Task } from "@/lib/models/Task";
 import { AutoApplyProfile } from "@/lib/models/AutoApplyProfile";
 import { ApplicationAttempt, type IApplicationAttempt } from "@/lib/models/ApplicationAttempt";
-import { storedFilePath } from "@/lib/storage/fileStorage";
+import { materializeStoredFile } from "@/lib/storage/fileStorage";
 import { openApplySession, closeApplySession, persistSession, detectBoardFromUrl } from "@/lib/automation/browser";
 import { detectCaptcha, solveCaptcha } from "@/lib/automation/captcha";
 import { detectAuthWall, detectOtpWall, detectSuccessConfirmation } from "@/lib/automation/pageState";
@@ -20,15 +20,35 @@ import {
   findClickableByText,
   hasVisibleFormFields,
   classifyPageIntent,
+  waitForApplicationForm,
 } from "@/lib/automation/formHeuristics";
 import { captureProof } from "@/lib/automation/proof";
 import { judgeApplicationScreenshot, locateApplyTarget, type ScreenshotDecision } from "@/lib/adapters/visionAdapter";
-import type { Page } from "playwright";
+import type { Locator, Page } from "playwright";
 
 const NAVIGATION_TIMEOUT_MS = 30_000;
-const MAX_OPEN_FORM_ATTEMPTS = 2; // clicks on a "job description" page trying to reach the real form
+const MAX_OPEN_FORM_ATTEMPTS = 3; // clicks on a "job description" page trying to reach the real form (JD -> "apply on company site" -> form)
+const FORM_RENDER_WAIT_MS = 12_000; // how long to wait for a JS-rendered form after navigating/clicking
+const NEW_TAB_WAIT_MS = 2_000; // an Apply link that opens a new tab does so right after the click
 const MAX_WIZARD_STEPS = 6; // bound on a multi-page application (info -> experience -> resume -> review -> submit);
 const MAX_AI_REVIEW_ATTEMPTS = 3; // how many times to retry before an unresolved outcome becomes FAILED
+
+/**
+ * Clicks a control and returns the page the flow should continue on: the new tab if the
+ * click opened one (very common for "Apply" links, target=_blank / window.open), otherwise
+ * the same page once its navigation settles.
+ */
+export async function clickAndFollow(page: Page, control: Locator): Promise<Page> {
+  const newTab = page.context().waitForEvent("page", { timeout: NEW_TAB_WAIT_MS }).catch(() => null);
+  await Promise.allSettled([page.waitForLoadState("domcontentloaded", { timeout: NAVIGATION_TIMEOUT_MS }), control.click()]);
+  const opened = await newTab;
+  if (!opened) return page;
+
+  await opened.waitForLoadState("domcontentloaded", { timeout: NAVIGATION_TIMEOUT_MS }).catch(() => undefined);
+  opened.setDefaultTimeout(NAVIGATION_TIMEOUT_MS);
+  await opened.bringToFront().catch(() => undefined);
+  return opened;
+}
 
 async function addStep(
   attempt: IApplicationAttempt,
@@ -64,6 +84,10 @@ export async function runApplyFlow(applicationId: string) {
   if (!job.applicationUrl) throw new Error(`Job ${job._id} has no applicationUrl to apply through`);
   if (!resume?.fileUrl) throw new Error(`Application ${applicationId} has no tailored resume PDF yet`);
 
+  // The tailored resume lives in Cloudflare R2; Playwright's file input needs a local path.
+  // Fetched before the attempt record exists so a download failure doesn't strand one in RUNNING.
+  const resumeFile = await materializeStoredFile(resume.fileUrl);
+
   const board = detectBoardFromUrl(job.applicationUrl) ?? "OTHER";
   const priorAttempts = await ApplicationAttempt.countDocuments({ applicationId: application._id });
 
@@ -80,8 +104,11 @@ export async function runApplyFlow(applicationId: string) {
   application.automationStatus = "IN_PROGRESS";
   await application.save();
 
-  const session = await openApplySession(String(candidate._id), detectBoardFromUrl(job.applicationUrl));
-  const resumeFilePath = storedFilePath(resume.fileUrl);
+  const session = await openApplySession(String(candidate._id), detectBoardFromUrl(job.applicationUrl)).catch(async (err) => {
+    await resumeFile.cleanup();
+    throw err;
+  });
+  const resumeFilePath = resumeFile.path;
   const proofSubdir = `proofs/${candidate._id}`;
 
   // Non-null aliases: TS narrowing from the guard clauses above doesn't carry into
@@ -216,11 +243,13 @@ export async function runApplyFlow(applicationId: string) {
   }
 
   try {
-    const page = await session.context.newPage();
+    let page = await session.context.newPage();
     page.setDefaultTimeout(NAVIGATION_TIMEOUT_MS);
 
     await page.goto(job.applicationUrl, { waitUntil: "domcontentloaded" });
     await addStep(attempt, "navigate", "SUCCESS", job.applicationUrl);
+    // Let JS-rendered content (the form, or the Apply button) appear before classifying anything.
+    await page.waitForLoadState("networkidle", { timeout: 6_000 }).catch(() => undefined);
 
     const initialWalls = await checkWalls(page, "initial");
     if (initialWalls.blocked) {
@@ -258,8 +287,11 @@ export async function runApplyFlow(applicationId: string) {
       if (intent === "APPLICATION_FORM") break;
       if (!applyButton) break;
 
-      await Promise.allSettled([page.waitForLoadState("domcontentloaded", { timeout: NAVIGATION_TIMEOUT_MS }), applyButton.click()]);
-      await addStep(attempt, "click_apply", "SUCCESS", "Clicked through to the application form");
+      const before = page.url();
+      page = await clickAndFollow(page, applyButton);
+      await addStep(attempt, "click_apply", "SUCCESS", `Clicked through to the application form${page.url() !== before ? ` — now at ${page.url()}` : ""}`);
+      // The form is usually injected by JS after the click; classify only once it had a chance to render.
+      await waitForApplicationForm(page, FORM_RENDER_WAIT_MS);
 
       const wallsAfterApply = await checkWalls(page, `post_apply_${i}`);
       if (wallsAfterApply.blocked) {
@@ -268,8 +300,12 @@ export async function runApplyFlow(applicationId: string) {
     }
 
     for (let step = 0; step < MAX_WIZARD_STEPS; step++) {
-      const formCtx = await findFormContext(page);
-      const stepIntent = await classifyPageIntent(formCtx);
+      let formCtx = await findFormContext(page);
+      let stepIntent = await classifyPageIntent(formCtx);
+      if (stepIntent !== "APPLICATION_FORM" && (await waitForApplicationForm(page, step === 0 ? FORM_RENDER_WAIT_MS : 4_000))) {
+        formCtx = await findFormContext(page);
+        stepIntent = await classifyPageIntent(formCtx);
+      }
       await addStep(attempt, "page_intent", "SUCCESS", `step=${step}: ${stepIntent} — ${page.url()}`);
 
       if (stepIntent !== "APPLICATION_FORM") {
@@ -289,6 +325,16 @@ export async function runApplyFlow(applicationId: string) {
       if (!control) {
         await addStep(attempt, "form_dead_end", "FAILED", `No Submit or Next control found on step ${step}`);
         break;
+      }
+
+      // A CAPTCHA token expires in ~2 minutes and is verified when the form is submitted, so
+      // solve (or refresh) it now, right before the click, instead of relying on an earlier solve.
+      if (await detectCaptcha(page)) {
+        const presubmit = await solveCaptcha(page);
+        await addStep(attempt, `step_${step}_presubmit_captcha`, presubmit.solved ? "SUCCESS" : "FAILED", presubmit.message);
+        if (!presubmit.solved) {
+          return await stopForHumanReview("presubmit_captcha_wall", "BLOCKED_CAPTCHA", `CAPTCHA on the form could not be solved: ${presubmit.message}`, page);
+        }
       }
 
       await Promise.allSettled([page.waitForLoadState("networkidle", { timeout: NAVIGATION_TIMEOUT_MS }), control.click()]);
@@ -446,5 +492,6 @@ export async function runApplyFlow(applicationId: string) {
     return { applicationId, status: "FAILED" as const, failureReason: message };
   } finally {
     await closeApplySession(session);
+    await resumeFile.cleanup();
   }
 }

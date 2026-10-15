@@ -88,26 +88,77 @@ export interface FormFillResult {
 }
 
 /**
- * True if this frame/page looks like a real application form, not a job-description
- * page that happens to have a stray input (site search, newsletter signup, cookie
- * banner). A single field isn't enough evidence on its own — a file input is (a
- * resume upload basically never appears outside an actual form), otherwise require
- * at least two meaningful fields together.
+ * True if this frame/page currently shows a real application form, not a job-description
+ * page that merely has inputs somewhere in its DOM (site search, newsletter box, cookie
+ * banner, a hidden "apply" modal). Only fields that are actually rendered count, fields in
+ * the header/nav/footer and search/newsletter-style fields are ignored, and fields are
+ * grouped per <form> so scattered unrelated inputs can't add up to a "form". A visible
+ * resume upload is strong evidence on its own; otherwise a group needs 3+ fields, or 2+
+ * with a name/email/phone-style field. Login/signup forms (password field) don't count here —
+ * those are handled as auth walls.
  */
 export async function hasVisibleFormFields(ctx: Interactable): Promise<boolean> {
-  const fileCount = await ctx
-    .locator('input[type="file"]')
-    .count()
-    .catch(() => 0);
-  if (fileCount > 0) return true;
+  return ctx
+    .evaluate(() => {
+      // tsx/esbuild wraps named inner functions in a __name() helper that doesn't exist in the browser.
+      (globalThis as unknown as { __name?: (f: unknown) => unknown }).__name ??= (f) => f;
 
-  const meaningfulCount = await ctx
-    .locator(
-      'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="checkbox"]):not([type="radio"]):not([type="search"]), textarea, select'
-    )
-    .count()
-    .catch(() => 0);
-  return meaningfulCount >= 2;
+      const isRendered = (el: Element) => {
+        if (el.getClientRects().length === 0) return false;
+        const style = getComputedStyle(el);
+        return style.visibility !== "hidden" && style.display !== "none";
+      };
+      const SKIP_TYPES = new Set(["hidden", "submit", "button", "image", "reset", "checkbox", "radio", "search"]);
+      const NOISE = /search|keyword|newsletter|subscribe|coupon|captcha|cookie|consent|filter/i;
+      const IDENTITY = /name|e-?mail|phone|mobile|resume|cv|linkedin/i;
+
+      const groups = new Map<Element | null, { fields: number; identity: boolean; file: boolean; password: boolean }>();
+      for (const el of Array.from(document.querySelectorAll<HTMLInputElement>("input, textarea, select"))) {
+        if (el.closest('header, nav, footer, [role="banner"], [role="navigation"], [role="search"], [aria-hidden="true"], [hidden]')) continue;
+        const form = el.closest("form");
+        const group = groups.get(form) ?? { fields: 0, identity: false, file: false, password: false };
+        groups.set(form, group);
+
+        const type = (el.type ?? "").toLowerCase();
+        if (type === "password") {
+          if (isRendered(el)) group.password = true;
+          continue;
+        }
+        if (type === "file") {
+          // File inputs are routinely visually hidden behind a custom button, so judge the
+          // surrounding form (or the page) instead of the input itself.
+          if (!form || isRendered(form)) group.file = true;
+          continue;
+        }
+        if (SKIP_TYPES.has(type) || !isRendered(el)) continue;
+
+        const descriptor = [el.name, el.id, el.placeholder, el.getAttribute("aria-label"), el.autocomplete].join(" ");
+        if (NOISE.test(descriptor)) continue;
+        group.fields++;
+        if (type === "email" || type === "tel" || IDENTITY.test(descriptor)) group.identity = true;
+      }
+
+      for (const group of groups.values()) {
+        if (group.password && !group.file) continue;
+        if (group.file || group.fields >= 3 || (group.fields >= 2 && group.identity)) return true;
+      }
+      return false;
+    })
+    .catch(() => false);
+}
+
+/**
+ * Polls until a real application form is rendered somewhere on the page (main frame or an
+ * iframe), returning false on timeout. Forms are frequently injected by JS after
+ * domcontentloaded, so classifying the page the instant it loads gives false negatives.
+ */
+export async function waitForApplicationForm(page: Page, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  do {
+    if (await hasVisibleFormFields(await findFormContext(page))) return true;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  } while (Date.now() < deadline);
+  return false;
 }
 
 /**
@@ -165,22 +216,34 @@ async function firstVisibleMatch(ctx: Interactable, selectors: string[]): Promis
   return null;
 }
 
+// A bare :has-text("Apply") matches "Applications", "Apply filters", "Applicant login"... so the
+// generic fallback only accepts controls whose whole accessible name is an apply call-to-action.
+const APPLY_CONTROL_NAME =
+  /^s*(easys+|quicks+)?apply(s+(now|today|here|online|fors+(thiss+)?(job|position|role)|tos+(thiss+)?(job|position|role)|ons+(thes+)?companys+(site|website)))?s*[→>»›]*s*$/i;
+
+async function firstVisibleRole(ctx: Interactable, name: RegExp): Promise<Locator | null> {
+  for (const role of ["button", "link"] as const) {
+    const locator = ctx.getByRole(role, { name }).first();
+    if ((await locator.count()) > 0 && (await locator.isVisible().catch(() => false))) return locator;
+  }
+  return null;
+}
+
 /**
  * The initial "open the application form" control on a job description/listing
  * page — distinct from the real submit button. Many career sites' applicationUrl
  * points at a JD page, not the form itself; this is what gets you from one to the other.
  */
 export async function findApplyButton(ctx: Interactable): Promise<Locator | null> {
-  return firstVisibleMatch(ctx, [
+  const exact = await firstVisibleMatch(ctx, [
     'a:has-text("Apply Now")',
     'button:has-text("Apply Now")',
     'a:has-text("Apply for this job")',
     'button:has-text("Apply for this job")',
     'a:has-text("Apply to this position")',
     'button:has-text("Apply to this position")',
-    'a:has-text("Apply")',
-    'button:has-text("Apply")',
   ]);
+  return exact ?? (await firstVisibleRole(ctx, APPLY_CONTROL_NAME));
 }
 
 /** The terminal control that actually submits the application — never matches "Apply" text. */
@@ -244,11 +307,22 @@ const APPLICATION_URL_PATTERN = /\/(apply|application|candidate)/i;
 export async function classifyPageIntent(ctx: Interactable): Promise<PageIntent> {
   if (await hasVisibleFormFields(ctx)) return "APPLICATION_FORM";
 
-  const url = ctx.url().toLowerCase();
-  if (APPLICATION_URL_PATTERN.test(url)) return "APPLICATION_FORM"; // form likely still loading (e.g. into an iframe)
-  if (JOB_DETAIL_URL_PATTERN.test(url)) return "JOB_DETAIL";
+  // The form may live in an iframe (Greenhouse embeds, some Workday tenants) while the
+  // top-level document is just the job description.
+  if ("frames" in ctx) {
+    for (const frame of ctx.frames()) {
+      if (frame !== ctx.mainFrame() && (await hasVisibleFormFields(frame))) return "APPLICATION_FORM";
+    }
+  }
 
+  // No form rendered. An Apply control means we're on the job description; the URL is only
+  // a tie-breaker. An /apply-style URL with no fields yet is *not* reported as a form — it is
+  // usually still loading, and the caller waits for it (waitForApplicationForm) rather than
+  // trying to fill a page with nothing on it.
   if ((await findApplyButton(ctx)) !== null) return "JOB_DETAIL";
+
+  const url = ctx.url().toLowerCase();
+  if (JOB_DETAIL_URL_PATTERN.test(url) && !APPLICATION_URL_PATTERN.test(url)) return "JOB_DETAIL";
 
   return "UNKNOWN";
 }

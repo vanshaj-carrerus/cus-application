@@ -11,6 +11,7 @@
     "seed": "tsx scripts/seed.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1150.0",
     "@google/generative-ai": "^0.24.1",
     "@ngrok/ngrok": "^1.7.0",
     "@radix-ui/react-avatar": "^1.2.6",

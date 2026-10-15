@@ -18,7 +18,8 @@ export async function renderHtmlToPdf(html: string): Promise<Buffer> {
   }
 }
 
+/** Renders and uploads the PDF to Cloudflare R2; the returned url is the public R2 URL. */
 export async function renderAndStorePdf(html: string, subdir: string): Promise<StoredFile> {
   const buffer = await renderHtmlToPdf(html);
-  return saveFile(buffer, { subdir, extension: "pdf" });
+  return saveFile(buffer, { subdir, extension: "pdf", cloud: true });
 }
