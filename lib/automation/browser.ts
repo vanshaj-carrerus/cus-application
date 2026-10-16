@@ -1,4 +1,5 @@
 import { chromium, type Browser, type BrowserContext } from "playwright";
+import { installCaptchaCapture } from "@/lib/automation/captcha";
 import type { JobBoard } from "@/lib/models/enums";
 import { JobBoardCredential } from "@/lib/models/JobBoardCredential";
 import { encryptSecret, decryptSecret } from "@/lib/security/crypto";
@@ -42,21 +43,29 @@ export interface ApplySession {
 export async function openApplySession(candidateId: string, board: JobBoard | undefined): Promise<ApplySession> {
   const browser = await chromium.launch();
 
+  // Every context records Cloudflare/Turnstile challenge parameters before page scripts run
+  // (see installCaptchaCapture) so a "Just a moment…" page can be handed to the solver later.
+  const newContext = async (options?: Parameters<Browser["newContext"]>[0]) => {
+    const context = await browser.newContext(options);
+    await installCaptchaCapture(context);
+    return context;
+  };
+
   if (!board) {
-    return { browser, context: await browser.newContext() };
+    return { browser, context: await newContext() };
   }
 
   const credential = await JobBoardCredential.findOne({ candidateId, board }).select("+sessionCookiesEncrypted");
   if (!credential?.sessionCookiesEncrypted) {
-    return { browser, context: await browser.newContext() };
+    return { browser, context: await newContext() };
   }
 
   try {
     const storageState = JSON.parse(decryptSecret(credential.sessionCookiesEncrypted));
-    return { browser, context: await browser.newContext({ storageState }), credentialId: credential._id as Types.ObjectId };
+    return { browser, context: await newContext({ storageState }), credentialId: credential._id as Types.ObjectId };
   } catch {
     // Corrupt/stale session — fall back to a fresh context rather than failing the run.
-    return { browser, context: await browser.newContext(), credentialId: credential._id as Types.ObjectId };
+    return { browser, context: await newContext(), credentialId: credential._id as Types.ObjectId };
   }
 }
 

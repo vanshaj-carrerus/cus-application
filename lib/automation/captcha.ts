@@ -1,4 +1,4 @@
-import type { Page } from "playwright";
+import type { BrowserContext, Page } from "playwright";
 import { env } from "@/lib/env";
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -6,89 +6,230 @@ import { env } from "@/lib/env";
  * ────────────────────────────────────────────────────────────────────────── */
 
 /** The type of CAPTCHA detected on the page, or null if none found. */
-export type CaptchaType = "RECAPTCHA_V2" | "RECAPTCHA_V3" | "HCAPTCHA" | "TURNSTILE" | "UNKNOWN";
+export type CaptchaType = "RECAPTCHA_V2" | "HCAPTCHA" | "TURNSTILE" | "UNKNOWN";
 
 export interface CaptchaDetection {
   detected: boolean;
   type: CaptchaType | null;
   siteKey: string | null;
   iframeUrl: string | null;
+  /** Invisible widgets have no checkbox; they fire on form submit. */
+  invisible: boolean;
+  enterprise: boolean;
+  /** The widget's response field already holds a token (solved by us or organically). */
+  tokenPresent: boolean;
+  /** Full-page Cloudflare interstitial ("Just a moment…"), not a widget embedded in a form. */
+  challengePage: boolean;
+  /** Cloudflare "you have been blocked" page: nothing on it can be solved. */
+  hardBlock: boolean;
+}
+
+const NOT_DETECTED: CaptchaDetection = {
+  detected: false,
+  type: null,
+  siteKey: null,
+  iframeUrl: null,
+  invisible: false,
+  enterprise: false,
+  tokenPresent: false,
+  challengePage: false,
+  hardBlock: false,
+};
+
+/**
+ * Cloudflare's "Just a moment…" interstitial renders its Turnstile with per-visit
+ * parameters (cData / chlPageData / action) that 2Captcha needs, and a callback that
+ * must be invoked with the solved token. Both only exist inside the page's own
+ * `turnstile.render()` call, so this wraps it — before any page script runs — and stashes
+ * the arguments on window.__cusTurnstile. The original render still runs, so pages behave
+ * exactly as before (an interstitial that passes on its own still passes).
+ */
+const CAPTURE_INIT_SCRIPT = `(() => {
+  if (window.__cusCaptureInstalled) return;
+  window.__cusCaptureInstalled = true;
+  const wrap = (ts) => {
+    if (!ts || typeof ts !== 'object' || ts.__cusWrapped || typeof ts.render !== 'function') return ts;
+    const orig = ts.render;
+    try {
+      ts.render = function (el, opts) {
+        try {
+          if (opts && typeof opts === 'object') {
+            window.__cusTurnstile = { sitekey: opts.sitekey, action: opts.action, cData: opts.cData, chlPageData: opts.chlPageData, callback: opts.callback, at: Date.now() };
+          }
+        } catch (e) {}
+        return orig.apply(this, arguments);
+      };
+      ts.__cusWrapped = true;
+    } catch (e) {}
+    return ts;
+  };
+  // Polling (not a defineProperty accessor on window): Cloudflare's challenge script behaves
+  // differently when window.turnstile is tampered with, and never creates it.
+  const timer = setInterval(() => {
+    if (window.turnstile) {
+      wrap(window.turnstile);
+      if (window.turnstile.__cusWrapped) clearInterval(timer);
+    }
+  }, 10);
+  setTimeout(() => clearInterval(timer), 60000);
+})();`;
+
+/** Must be called on every browser context before navigating (see browser.ts). */
+export async function installCaptchaCapture(context: BrowserContext): Promise<void> {
+  await context.addInitScript(CAPTURE_INIT_SCRIPT);
+}
+
+// reCAPTCHA tokens expire ~120s after they're issued; leave a margin so a token we
+// injected is never trusted when it is about to go stale (e.g. a long form fill).
+const TOKEN_TTL_MS = 100_000;
+const tokenInjectedAt = new WeakMap<Page, number>();
+
+function hasUsableToken(page: Page, detection: CaptchaDetection): boolean {
+  if (!detection.tokenPresent) return false;
+  const injectedAt = tokenInjectedAt.get(page);
+  return injectedAt === undefined || Date.now() - injectedAt < TOKEN_TTL_MS;
 }
 
 /**
- * Detects a CAPTCHA challenge on the current page and identifies its type +
- * sitekey when possible. This information is then used by solveCaptcha() to
- * pick the right solving strategy.
+ * True when the page shows a CAPTCHA that still needs solving. A widget that already
+ * holds a fresh response token does not count — the widget iframe stays in the DOM
+ * after a solve, so "iframe exists" alone can't be used as the signal.
  */
 export async function detectCaptcha(page: Page): Promise<boolean> {
   const detection = await detectCaptchaDetails(page);
-  return detection.detected;
+  return detection.detected && !hasUsableToken(page, detection);
 }
 
 export async function detectCaptchaDetails(page: Page): Promise<CaptchaDetection> {
-  // --- reCAPTCHA v2 ---
-  const recaptchaIframe = page.locator('iframe[src*="recaptcha"]');
-  if ((await recaptchaIframe.count()) > 0) {
-    const src = await recaptchaIframe.first().getAttribute("src").catch(() => null);
-    const siteKey = await extractSiteKey(page, "recaptcha");
-    return { detected: true, type: "RECAPTCHA_V2", siteKey, iframeUrl: src };
-  }
+  const scan = await page
+    .evaluate(() => {
+      // tsx/esbuild wraps named inner functions in a __name() helper that doesn't exist in the browser.
+      (globalThis as unknown as { __name?: (f: unknown) => unknown }).__name ??= (f) => f;
+      const win = window;
+      const all = (sel: string) => Array.from(document.querySelectorAll<HTMLElement>(sel));
+      const hasValue = (sel: string) => all(sel).some((el) => ((el as HTMLInputElement).value ?? "").trim().length > 0);
+      const query = (src: string) => {
+        try {
+          return new URL(src, location.href).searchParams;
+        } catch {
+          return new URLSearchParams();
+        }
+      };
+      const hash = (src: string) => {
+        try {
+          return new URLSearchParams(new URL(src, location.href).hash.slice(1));
+        } catch {
+          return new URLSearchParams();
+        }
+      };
 
-  const recaptchaDiv = page.locator(".g-recaptcha, [data-sitekey]");
-  if ((await recaptchaDiv.count()) > 0) {
-    const siteKey = await recaptchaDiv.first().getAttribute("data-sitekey").catch(() => null);
-    // reCAPTCHA v3 typically has a data-size="invisible" or is loaded with explicit rendering
-    const isInvisible = await page.locator('.g-recaptcha[data-size="invisible"]').count();
+      // --- reCAPTCHA ---
+      const rcDiv = all(".g-recaptcha[data-sitekey]")[0];
+      const rcFrame = all('iframe[src*="recaptcha/api2/anchor"], iframe[src*="recaptcha/enterprise/anchor"]')[0] as HTMLIFrameElement | undefined;
+      // reCAPTCHA v3 loads api.js?render=<sitekey> and shows only a corner badge (an invisible
+      // "anchor" iframe). There is nothing to solve on the page — the site scores the session
+      // when the form is submitted — so it must not be mistaken for a v2 challenge.
+      const v3Render = all('script[src*="recaptcha/api.js"], script[src*="recaptcha/enterprise.js"]')
+        .map((s) => query((s as HTMLScriptElement).src).get("render"))
+        .find((r) => r && r !== "explicit");
+      let recaptcha: { siteKey: string | null; invisible: boolean; enterprise: boolean; src: string | null } | null = null;
+      if (rcDiv) {
+        recaptcha = {
+          siteKey: rcDiv.getAttribute("data-sitekey"),
+          invisible: rcDiv.getAttribute("data-size") === "invisible",
+          enterprise: !!rcFrame && rcFrame.src.includes("/enterprise/"),
+          src: rcFrame?.src ?? null,
+        };
+      } else if (rcFrame && !v3Render) {
+        const q = query(rcFrame.src);
+        recaptcha = { siteKey: q.get("k"), invisible: q.get("size") === "invisible", enterprise: rcFrame.src.includes("/enterprise/"), src: rcFrame.src };
+      }
+
+      // --- hCaptcha ---
+      const hcDiv = all(".h-captcha[data-sitekey]")[0];
+      const hcFrame = all('iframe[src*="hcaptcha.com"]')[0] as HTMLIFrameElement | undefined;
+      const hcaptcha =
+        hcDiv || hcFrame
+          ? {
+              siteKey: hcDiv?.getAttribute("data-sitekey") ?? (hcFrame ? hash(hcFrame.src).get("sitekey") : null),
+              invisible: hcDiv?.getAttribute("data-size") === "invisible",
+              src: hcFrame?.src ?? null,
+            }
+          : null;
+
+      // --- Cloudflare Turnstile ---
+      const tsDiv = all(".cf-turnstile[data-sitekey]")[0];
+      const tsFrame = all('iframe[src*="challenges.cloudflare.com"]')[0] as HTMLIFrameElement | undefined;
+      const turnstile =
+        tsDiv || tsFrame
+          ? {
+              siteKey: tsDiv?.getAttribute("data-sitekey") ?? tsFrame?.src.match(/\/(0x[0-9A-Za-z_-]+)\//)?.[1] ?? null,
+              src: tsFrame?.src ?? null,
+            }
+          : null;
+
+      // Cloudflare interstitial: title is the reliable marker; _cf_chl_opt / #challenge-form
+      // exist only on challenge pages (the cdn-cgi/challenge-platform script alone is also
+      // loaded on ordinary Cloudflare-fronted sites, so it is NOT used as a signal).
+      const captured = (win as unknown as { __cusTurnstile?: { sitekey?: string } }).__cusTurnstile;
+      const challengePage =
+        /just a moment|checking your browser|verifying you are human/i.test(document.title) ||
+        "_cf_chl_opt" in window ||
+        !!document.querySelector("#challenge-form, #challenge-running, #challenge-stage");
+
+      // "Attention Required! | Cloudflare" / "Sorry, you have been blocked" (error 1020 etc.):
+      // the site refused this IP/browser outright — there is no widget to solve.
+      const hardBlock = /attention required.*cloudflare|access denied/i.test(document.title) && /sorry, you have been blocked|cloudflare ray id/i.test(document.body?.innerText ?? "");
+
+      return {
+        hardBlock,
+        challengePage,
+        capturedSiteKey: captured?.sitekey ?? null,
+        recaptcha,
+        hcaptcha,
+        turnstile,
+        genericIframe: all('iframe[title*="captcha" i]').length > 0,
+        bodyText: document.body?.innerText ?? "",
+        tokens: {
+          recaptcha: hasValue("textarea[name='g-recaptcha-response'], #g-recaptcha-response"),
+          hcaptcha: hasValue("textarea[name='h-captcha-response']"),
+          turnstile: hasValue("input[name='cf-turnstile-response']"),
+        },
+      };
+    })
+    .catch(() => null);
+
+  if (!scan) return NOT_DETECTED;
+
+  if (scan.hardBlock) {
+    return { ...NOT_DETECTED, detected: true, type: "UNKNOWN", hardBlock: true };
+  }
+  if (scan.challengePage) {
+    return { ...NOT_DETECTED, detected: true, type: "TURNSTILE", siteKey: scan.capturedSiteKey ?? scan.turnstile?.siteKey ?? null, iframeUrl: scan.turnstile?.src ?? null, challengePage: true };
+  }
+  if (scan.recaptcha) {
     return {
+      ...NOT_DETECTED,
       detected: true,
-      type: isInvisible > 0 ? "RECAPTCHA_V3" : "RECAPTCHA_V2",
-      siteKey,
-      iframeUrl: null,
+      type: "RECAPTCHA_V2",
+      siteKey: scan.recaptcha.siteKey,
+      iframeUrl: scan.recaptcha.src,
+      invisible: scan.recaptcha.invisible,
+      enterprise: scan.recaptcha.enterprise,
+      tokenPresent: scan.tokens.recaptcha,
     };
   }
-
-  // --- hCaptcha ---
-  const hcaptchaIframe = page.locator('iframe[src*="hcaptcha"]');
-  if ((await hcaptchaIframe.count()) > 0) {
-    const src = await hcaptchaIframe.first().getAttribute("src").catch(() => null);
-    const siteKey = await extractSiteKey(page, "hcaptcha");
-    return { detected: true, type: "HCAPTCHA", siteKey, iframeUrl: src };
+  if (scan.hcaptcha) {
+    return { ...NOT_DETECTED, detected: true, type: "HCAPTCHA", siteKey: scan.hcaptcha.siteKey, iframeUrl: scan.hcaptcha.src, invisible: scan.hcaptcha.invisible, tokenPresent: scan.tokens.hcaptcha };
+  }
+  if (scan.turnstile) {
+    return { ...NOT_DETECTED, detected: true, type: "TURNSTILE", siteKey: scan.turnstile.siteKey, iframeUrl: scan.turnstile.src, tokenPresent: scan.tokens.turnstile };
+  }
+  if (scan.genericIframe || /verify (that )?you.{0,15}(human|robot)|complete the captcha/i.test(scan.bodyText)) {
+    return { ...NOT_DETECTED, detected: true, type: "UNKNOWN" };
   }
 
-  const hcaptchaDiv = page.locator(".h-captcha");
-  if ((await hcaptchaDiv.count()) > 0) {
-    const siteKey = await hcaptchaDiv.first().getAttribute("data-sitekey").catch(() => null);
-    return { detected: true, type: "HCAPTCHA", siteKey, iframeUrl: null };
-  }
-
-  // --- Cloudflare Turnstile ---
-  const turnstileIframe = page.locator('iframe[src*="challenges.cloudflare.com"]');
-  if ((await turnstileIframe.count()) > 0) {
-    const siteKey = await page.locator(".cf-turnstile").first().getAttribute("data-sitekey").catch(() => null);
-    return { detected: true, type: "TURNSTILE", siteKey, iframeUrl: null };
-  }
-
-  // --- Generic captcha text ---
-  const captchaIframe = page.locator('iframe[title*="captcha" i]');
-  if ((await captchaIframe.count()) > 0) {
-    return { detected: true, type: "UNKNOWN", siteKey: null, iframeUrl: null };
-  }
-
-  const bodyText = await page.locator("body").innerText().catch(() => "");
-  if (/verify (that )?you.{0,15}(human|robot)|complete the captcha/i.test(bodyText)) {
-    return { detected: true, type: "UNKNOWN", siteKey: null, iframeUrl: null };
-  }
-
-  return { detected: false, type: null, siteKey: null, iframeUrl: null };
-}
-
-async function extractSiteKey(page: Page, provider: "recaptcha" | "hcaptcha"): Promise<string | null> {
-  const selectors = provider === "recaptcha" ? [".g-recaptcha", "[data-sitekey]"] : [".h-captcha", "[data-sitekey]"];
-  for (const sel of selectors) {
-    const key = await page.locator(sel).first().getAttribute("data-sitekey").catch(() => null);
-    if (key) return key;
-  }
-  return null;
+  return NOT_DETECTED;
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -102,46 +243,62 @@ export interface CaptchaSolveResult {
 }
 
 const MAX_SOLVE_ATTEMPTS = 3;
+// Every 2Captcha attempt that returns a token is billed, so keep paid retries low.
+const MAX_2CAPTCHA_ATTEMPTS = 2;
+const SOLVE_FIRST_POLL_DELAY_MS = 15_000; // 2Captcha advises waiting 15–20s before the first poll
 const SOLVE_POLL_INTERVAL_MS = 5_000;
-const SOLVE_POLL_TIMEOUT_MS = 120_000;
+const SOLVE_POLL_TIMEOUT_MS = 150_000;
+const API_REQUEST_TIMEOUT_MS = 20_000;
 
 /**
- * Attempts to solve the detected CAPTCHA using a tiered strategy:
+ * Attempts to clear the detected CAPTCHA using a tiered strategy:
  *
- * 1. **2Captcha API** (production) — if CAPTCHA_API_KEY is configured, sends
- *    the sitekey + page URL to 2Captcha's API and injects the response token.
- *    This is the most reliable method and supports reCAPTCHA v2/v3, hCaptcha,
- *    and Turnstile.
+ * 1. **2Captcha API** — if CAPTCHA_API_KEY is configured and the widget's sitekey is
+ *    known, a human/AI worker solves it remotely and we write the returned token into
+ *    the page (response field + the widget's callback). Supports reCAPTCHA v2
+ *    (checkbox / invisible / enterprise), hCaptcha and Cloudflare Turnstile.
  *
- * 2. **Checkbox click** (dev fallback) — for reCAPTCHA v2, attempts to click
- *    the "I'm not a robot" checkbox inside the iframe. Works in local/dev
- *    environments where reCAPTCHA's risk analysis scores the session as low-risk.
+ * 2. **Checkbox click** (fallback) — for reCAPTCHA v2, click the "I'm not a robot"
+ *    checkbox. Only works when the session scores as low-risk.
  *
- * 3. **AI vision** (dev fallback) — takes a screenshot and asks the AI vision
- *    chain to identify what type of challenge is shown and suggest an action.
- *    This is a best-effort heuristic, not a guaranteed solve.
+ * 3. **AI vision** (fallback) — screenshot + vision model, best-effort only.
  *
- * Returns a result indicating whether the CAPTCHA was cleared. The caller
- * (applyEngine.ts) decides whether to continue or hand off to a human based
- * on `result.solved`.
+ * Returns whether the CAPTCHA was cleared. The caller (applyEngine.ts) decides whether
+ * to continue or hand off to a human based on `result.solved`.
  */
 export async function solveCaptcha(page: Page): Promise<CaptchaSolveResult> {
   const detection = await detectCaptchaDetails(page);
   if (!detection.detected) {
     return { solved: true, method: "none", message: "No CAPTCHA detected on re-check" };
   }
+  if (hasUsableToken(page, detection)) {
+    return { solved: true, method: "none", message: "CAPTCHA already carries a valid response token" };
+  }
+
+  if (detection.hardBlock) {
+    return {
+      solved: false,
+      method: "none",
+      message: "The site blocked this browser outright (Cloudflare 'you have been blocked' page) — no CAPTCHA to solve; needs a different IP/browser or a human",
+    };
+  }
+
+  // --- Cloudflare "Just a moment…" interstitial: needs its own parameters, see below ---
+  if (detection.challengePage) {
+    return solveCloudflareChallenge(page);
+  }
+
+  // --- Tier 1: 2Captcha ---
+  if (env.captchaApiKey && detection.siteKey) {
+    let last: ApiOutcome = { solved: false, method: "2captcha", message: "2Captcha was not attempted" };
+    for (let attempt = 1; attempt <= MAX_2CAPTCHA_ATTEMPTS; attempt++) {
+      last = await solveWith2Captcha(page, detection);
+      if (last.solved || !last.retryable) return last;
+    }
+    return last;
+  }
 
   for (let attempt = 1; attempt <= MAX_SOLVE_ATTEMPTS; attempt++) {
-    // --- Tier 1: 2Captcha API (production) ---
-    if (env.captchaApiKey && detection.siteKey) {
-      const apiResult = await solveWith2Captcha(page, detection);
-      if (apiResult.solved) return apiResult;
-      // If 2Captcha failed, don't fall through to cheaper methods — it means
-      // something is genuinely wrong (bad sitekey, page changed, etc.)
-      if (attempt === MAX_SOLVE_ATTEMPTS) return apiResult;
-      continue;
-    }
-
     // --- Tier 2: Checkbox click (reCAPTCHA v2 only) ---
     if (detection.type === "RECAPTCHA_V2") {
       const clickResult = await solveWithCheckboxClick(page);
@@ -158,178 +315,292 @@ export async function solveCaptcha(page: Page): Promise<CaptchaSolveResult> {
     }
   }
 
+  const reason = env.captchaApiKey
+    ? "no sitekey could be read from the page for 2Captcha"
+    : "CAPTCHA_API_KEY is not configured";
   return {
     solved: false,
     method: "none",
-    message: `CAPTCHA (${detection.type ?? "unknown"}) could not be solved after ${MAX_SOLVE_ATTEMPTS} attempts`,
+    message: `CAPTCHA (${detection.type ?? "unknown"}) could not be solved after ${MAX_SOLVE_ATTEMPTS} attempts (${reason})`,
   };
 }
 
 /* ── Tier 1: 2Captcha API ─────────────────────────────────────────────── */
 
-async function solveWith2Captcha(page: Page, detection: CaptchaDetection): Promise<CaptchaSolveResult> {
+type ApiOutcome = CaptchaSolveResult & { retryable?: boolean };
+
+// Account-level problems: retrying can't help, so stop spending time (and stop hitting the
+// API for every queued application) until someone fixes the key / tops up the balance.
+const ACCOUNT_ERRORS: Record<string, string> = {
+  ERROR_WRONG_USER_KEY: "the CAPTCHA_API_KEY is malformed",
+  ERROR_KEY_DOES_NOT_EXIST: "the CAPTCHA_API_KEY does not exist",
+  ERROR_ZERO_BALANCE: "the 2Captcha balance is empty — top up at 2captcha.com",
+  ERROR_IP_NOT_ALLOWED: "this server's IP is not allowed for the API key",
+  IP_BANNED: "this server's IP is banned by 2Captcha",
+};
+const RETRYABLE_ERRORS = new Set(["ERROR_CAPTCHA_UNSOLVABLE", "ERROR_NO_SLOT_AVAILABLE", "CAPCHA_NOT_READY"]);
+const ACCOUNT_ERROR_COOLDOWN_MS = 10 * 60_000;
+let accountErrorUntil = 0;
+let accountErrorMessage = "";
+
+async function twoCaptchaApi(path: "in.php" | "res.php", params: Record<string, string>, method: "GET" | "POST"): Promise<{ status: number; request: string }> {
+  const body = new URLSearchParams({ ...params, json: "1" });
+  const res = await fetch(method === "GET" ? `https://2captcha.com/${path}?${body}` : `https://2captcha.com/${path}`, {
+    method,
+    ...(method === "POST" ? { body, headers: { "Content-Type": "application/x-www-form-urlencoded" } } : {}),
+    signal: AbortSignal.timeout(API_REQUEST_TIMEOUT_MS),
+  });
+  return (await res.json()) as { status: number; request: string };
+}
+
+function apiFailure(code: string, extra = ""): ApiOutcome {
+  const accountIssue = ACCOUNT_ERRORS[code];
+  if (accountIssue) {
+    accountErrorMessage = `${accountIssue} (${code})`;
+    accountErrorUntil = Date.now() + ACCOUNT_ERROR_COOLDOWN_MS;
+    return { solved: false, method: "2captcha", message: `2Captcha unavailable: ${accountErrorMessage}` };
+  }
+  return { solved: false, method: "2captcha", message: `2Captcha error: ${code}${extra}`, retryable: RETRYABLE_ERRORS.has(code) };
+}
+
+const debug = (...args: unknown[]) => {
+  if (process.env.CAPTCHA_DEBUG) console.log("[captcha]", ...args);
+};
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function solveWith2Captcha(page: Page, detection: CaptchaDetection): Promise<ApiOutcome> {
   const apiKey = env.captchaApiKey;
   if (!apiKey || !detection.siteKey) {
     return { solved: false, method: "2captcha", message: "2Captcha API key or sitekey missing" };
   }
-
-  const pageUrl = page.url();
-  const methodMap: Record<string, string> = {
-    RECAPTCHA_V2: "userrecaptcha",
-    RECAPTCHA_V3: "userrecaptcha",
-    HCAPTCHA: "hcaptcha",
-    TURNSTILE: "turnstile",
-  };
-  const method = methodMap[detection.type ?? ""] ?? "userrecaptcha";
+  if (Date.now() < accountErrorUntil) {
+    return { solved: false, method: "2captcha", message: `2Captcha unavailable: ${accountErrorMessage}` };
+  }
 
   try {
-    // Step 1: Submit the CAPTCHA task
-    const submitParams = new URLSearchParams({
-      key: apiKey,
-      method,
-      googlekey: detection.siteKey,
-      sitekey: detection.siteKey,
-      pageurl: pageUrl,
-      json: "1",
-    });
+    const userAgent = await page.evaluate(() => navigator.userAgent).catch(() => "");
+    const task: Record<string, string> = { key: apiKey, pageurl: page.url() };
+    if (userAgent) task.userAgent = userAgent;
 
-    // reCAPTCHA v3 needs action and min_score
-    if (detection.type === "RECAPTCHA_V3") {
-      submitParams.set("version", "v3");
-      submitParams.set("action", "submit");
-      submitParams.set("min_score", "0.3");
+    if (detection.type === "HCAPTCHA") {
+      Object.assign(task, { method: "hcaptcha", sitekey: detection.siteKey });
+      if (detection.invisible) task.invisible = "1";
+    } else if (detection.type === "TURNSTILE") {
+      Object.assign(task, { method: "turnstile", sitekey: detection.siteKey });
+    } else {
+      Object.assign(task, { method: "userrecaptcha", googlekey: detection.siteKey });
+      if (detection.invisible) task.invisible = "1";
+      if (detection.enterprise) task.enterprise = "1";
     }
 
-    const submitRes = await fetch(`https://2captcha.com/in.php?${submitParams.toString()}`);
-    const submitBody = (await submitRes.json()) as { status: number; request: string };
-    if (submitBody.status !== 1) {
-      return { solved: false, method: "2captcha", message: `2Captcha submit failed: ${submitBody.request}` };
-    }
+    const submit = await twoCaptchaApi("in.php", task, "POST");
+    if (submit.status !== 1) return apiFailure(submit.request, " (submit)");
+    const taskId = submit.request;
 
-    const taskId = submitBody.request;
+    const startedAt = Date.now();
+    await sleep(SOLVE_FIRST_POLL_DELAY_MS);
 
-    // Step 2: Poll for the solution
-    const startTime = Date.now();
-    await page.waitForTimeout(SOLVE_POLL_INTERVAL_MS); // initial wait before first poll
-
-    while (Date.now() - startTime < SOLVE_POLL_TIMEOUT_MS) {
-      const pollRes = await fetch(`https://2captcha.com/res.php?key=${apiKey}&action=get&id=${taskId}&json=1`);
-      const pollBody = (await pollRes.json()) as { status: number; request: string };
-
-      if (pollBody.status === 1) {
-        // Got a solution — inject it into the page
-        const token = pollBody.request;
-        await injectCaptchaToken(page, detection, token);
-        // Verify the CAPTCHA is gone after injection
-        await page.waitForTimeout(2_000);
-        const stillThere = await detectCaptcha(page);
-        if (!stillThere) {
-          return { solved: true, method: "2captcha", message: `Solved via 2Captcha (${detection.type}, task ${taskId})` };
+    while (Date.now() - startedAt < SOLVE_POLL_TIMEOUT_MS) {
+      const poll = await twoCaptchaApi("res.php", { key: apiKey, action: "get", id: taskId }, "GET");
+      if (poll.status === 1) {
+        const token = poll.request;
+        if (!(await injectCaptchaToken(page, detection, token))) {
+          return { solved: false, method: "2captcha", message: `2Captcha returned a token (task ${taskId}) but the page has no ${detection.type} response field to put it in` };
         }
-        // Token injected but CAPTCHA still showing — might need form submission
-        await trySubmitAfterTokenInjection(page);
-        await page.waitForTimeout(2_000);
-        const stillThereAfterSubmit = await detectCaptcha(page);
-        return {
-          solved: !stillThereAfterSubmit,
-          method: "2captcha",
-          message: stillThereAfterSubmit
-            ? "2Captcha token injected but CAPTCHA still present after submission attempt"
-            : `Solved via 2Captcha after form submission (${detection.type}, task ${taskId})`,
-        };
+        tokenInjectedAt.set(page, Date.now());
+        return { solved: true, method: "2captcha", message: `Solved via 2Captcha (${detection.type}${detection.invisible ? ", invisible" : ""}, task ${taskId})` };
       }
-
-      if (pollBody.request !== "CAPCHA_NOT_READY") {
-        return { solved: false, method: "2captcha", message: `2Captcha error: ${pollBody.request}` };
-      }
-
-      await page.waitForTimeout(SOLVE_POLL_INTERVAL_MS);
+      if (poll.request !== "CAPCHA_NOT_READY") return apiFailure(poll.request, ` (task ${taskId})`);
+      await sleep(SOLVE_POLL_INTERVAL_MS);
     }
 
-    return { solved: false, method: "2captcha", message: "2Captcha solve timed out" };
+    return { solved: false, method: "2captcha", message: `2Captcha solve timed out after ${SOLVE_POLL_TIMEOUT_MS / 1000}s (task ${taskId})`, retryable: true };
+  } catch (err) {
+    return { solved: false, method: "2captcha", message: `2Captcha error: ${err instanceof Error ? err.message : String(err)}`, retryable: true };
+  }
+}
+
+/* ── Cloudflare "Just a moment…" interstitial ─────────────────────────── */
+
+const CHALLENGE_SELF_CLEAR_WAIT_MS = 8_000;
+const CHALLENGE_PARAMS_WAIT_MS = 12_000;
+const CHALLENGE_CLEAR_AFTER_TOKEN_MS = 20_000;
+
+async function isChallengePage(page: Page): Promise<boolean> {
+  return page
+    .evaluate(() => /just a moment|checking your browser|verifying you are human/i.test(document.title) || "_cf_chl_opt" in window || !!document.querySelector("#challenge-form, #challenge-running, #challenge-stage"))
+    .catch(() => false);
+}
+
+async function waitUntilChallengeClears(page: Page, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!(await isChallengePage(page))) return true;
+    await sleep(500);
+  }
+  return !(await isChallengePage(page));
+}
+
+type V2Response = { errorId: number; errorCode?: string; errorDescription?: string; taskId?: number; status?: string; solution?: { token?: string; userAgent?: string } };
+
+async function twoCaptchaV2(endpoint: "createTask" | "getTaskResult", body: Record<string, unknown>): Promise<V2Response> {
+  const res = await fetch(`https://api.2captcha.com/${endpoint}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ clientKey: env.captchaApiKey, ...body }),
+    signal: AbortSignal.timeout(API_REQUEST_TIMEOUT_MS),
+  });
+  return (await res.json()) as V2Response;
+}
+
+/**
+ * Solves a full-page Cloudflare challenge. Non-interactive challenges often pass by
+ * themselves within a few seconds, so wait for that first (free). Otherwise send the
+ * parameters captured from the page's turnstile.render() call to 2Captcha and hand the
+ * token back through the page's own callback, which makes Cloudflare issue the clearance
+ * cookie and reload the real page.
+ */
+async function solveCloudflareChallenge(page: Page): Promise<CaptchaSolveResult> {
+  if (await waitUntilChallengeClears(page, CHALLENGE_SELF_CLEAR_WAIT_MS)) {
+    return { solved: true, method: "none", message: "Cloudflare check passed on its own" };
+  }
+  if (!env.captchaApiKey) {
+    return { solved: false, method: "none", message: "Cloudflare challenge page and CAPTCHA_API_KEY is not configured" };
+  }
+  if (Date.now() < accountErrorUntil) {
+    return { solved: false, method: "2captcha", message: `2Captcha unavailable: ${accountErrorMessage}` };
+  }
+
+  type Captured = { sitekey?: string; action?: string; cData?: string; chlPageData?: string };
+  const readCaptured = () => page.evaluate(() => (window as unknown as { __cusTurnstile?: Captured }).__cusTurnstile ?? null).catch(() => null);
+  let params: Captured | null = null;
+  for (const deadline = Date.now() + CHALLENGE_PARAMS_WAIT_MS; Date.now() < deadline; ) {
+    params = await readCaptured();
+    if (params?.sitekey) break;
+    await sleep(500);
+  }
+  if (!params?.sitekey) {
+    return { solved: false, method: "2captcha", message: "Cloudflare challenge page: could not capture the Turnstile parameters (page did not call turnstile.render — it may be a hard block, not a solvable challenge)" };
+  }
+
+  try {
+    const task: Record<string, unknown> = { type: "TurnstileTaskProxyless", websiteURL: page.url(), websiteKey: params.sitekey };
+    if (params.action) task.action = params.action;
+    if (params.cData) task.data = params.cData;
+    if (params.chlPageData) task.pagedata = params.chlPageData;
+
+    debug("cf task", { ...task, pagedata: String(task.pagedata).slice(0, 12), data: task.data, url: page.url().slice(0, 80) });
+    const created = await twoCaptchaV2("createTask", { task });
+    if (created.errorId !== 0 || !created.taskId) return apiFailure(created.errorCode ?? "UNKNOWN", " (createTask)");
+
+    const startedAt = Date.now();
+    await sleep(SOLVE_FIRST_POLL_DELAY_MS);
+    while (Date.now() - startedAt < SOLVE_POLL_TIMEOUT_MS) {
+      const result = await twoCaptchaV2("getTaskResult", { taskId: created.taskId });
+      if (result.errorId !== 0) return apiFailure(result.errorCode ?? "UNKNOWN", ` (task ${created.taskId})`);
+      if (result.status === "ready" && result.solution?.token) {
+        // The page may have re-rendered (new cData) while we waited — use the latest callback.
+        // Cloudflare ties the clearance to the browser that submits the token, and the token
+        // was produced under the solver's user agent — present the same one (2Captcha docs).
+        if (result.solution.userAgent) {
+          await page
+            .context()
+            .newCDPSession(page)
+            .then((cdp) => cdp.send("Network.setUserAgentOverride", { userAgent: result.solution!.userAgent! }))
+            .catch(() => debug("cf: could not override user agent"));
+        }
+        const nowParams = await readCaptured();
+        debug("cf deliver", { sameCData: nowParams?.cData === params.cData, sameAction: nowParams?.action === params.action, ua: result.solution.userAgent, url: page.url().slice(0, 80) });
+        const delivered = await page
+          .evaluate((token) => {
+            const cb = (window as unknown as { __cusTurnstile?: { callback?: (t: string) => void } }).__cusTurnstile?.callback;
+            if (typeof cb !== "function") return false;
+            cb(token);
+            return true;
+          }, result.solution.token)
+          .catch(() => false);
+        if (!delivered) {
+          return { solved: false, method: "2captcha", message: `2Captcha solved the Cloudflare challenge (task ${created.taskId}) but the page exposed no callback to hand the token to` };
+        }
+        const cleared = await waitUntilChallengeClears(page, CHALLENGE_CLEAR_AFTER_TOKEN_MS);
+        tokenInjectedAt.set(page, Date.now());
+        return cleared
+          ? { solved: true, method: "2captcha", message: `Solved Cloudflare challenge via 2Captcha (task ${created.taskId})` }
+          : { solved: false, method: "2captcha", message: `Cloudflare rejected the 2Captcha token (task ${created.taskId}); the challenge page is still showing` };
+      }
+      await sleep(SOLVE_POLL_INTERVAL_MS);
+    }
+    return { solved: false, method: "2captcha", message: `2Captcha Cloudflare solve timed out after ${SOLVE_POLL_TIMEOUT_MS / 1000}s (task ${created.taskId})` };
   } catch (err) {
     return { solved: false, method: "2captcha", message: `2Captcha error: ${err instanceof Error ? err.message : String(err)}` };
   }
 }
 
-async function injectCaptchaToken(page: Page, detection: CaptchaDetection, token: string): Promise<void> {
-  if (detection.type === "RECAPTCHA_V2" || detection.type === "RECAPTCHA_V3") {
-    await page.evaluate((t) => {
-      const el = document.querySelector("#g-recaptcha-response, [name='g-recaptcha-response']") as HTMLTextAreaElement | null;
-      if (el) {
-        el.style.display = "block";
-        el.value = t;
-        el.style.display = "none";
-      }
-      // Also try the callback if registered
-      const grecaptchaCfg = (window as unknown as Record<string, any>)["___grecaptcha_cfg"];
-      if (grecaptchaCfg) {
-        try {
-          const clients = grecaptchaCfg["clients"];
-          if (clients) {
-            for (const clientKey of Object.keys(clients)) {
-              const client = clients[clientKey];
-              for (const propKey of Object.keys(client)) {
-                const prop = client[propKey];
-                if (prop && typeof prop === "object" && typeof prop.callback === "function") {
-                  prop.callback(t);
-                }
-              }
-            }
-          }
-        } catch {
-          // best-effort callback invocation
-        }
-      }
-    }, token);
-  } else if (detection.type === "HCAPTCHA") {
-    await page.evaluate((t) => {
-      const el = document.querySelector("[name='h-captcha-response'], [name='g-recaptcha-response']") as HTMLTextAreaElement | null;
-      if (el) {
-        el.style.display = "block";
-        el.value = t;
-        el.style.display = "none";
-      }
-      // hCaptcha callback
-      try {
-        const hcaptchaObj = (window as unknown as Record<string, { getRespKey?: () => string }>)["hcaptcha"];
-        if (hcaptchaObj) {
-          const textarea = document.querySelector("textarea[name='h-captcha-response']") as HTMLTextAreaElement | null;
-          if (textarea) textarea.value = t;
-        }
-      } catch {
-        // best-effort
-      }
-    }, token);
-  } else if (detection.type === "TURNSTILE") {
-    await page.evaluate((t) => {
-      const el = document.querySelector("[name='cf-turnstile-response']") as HTMLInputElement | null;
-      if (el) el.value = t;
-      // Turnstile callback
-      try {
-        const turnstileWidgets = document.querySelectorAll(".cf-turnstile");
-        turnstileWidgets.forEach((widget) => {
-          const callbackName = widget.getAttribute("data-callback");
-          if (callbackName && typeof (window as unknown as Record<string, (...args: unknown[]) => void>)[callbackName] === "function") {
-            (window as unknown as Record<string, (...args: unknown[]) => void>)[callbackName](t);
-          }
-        });
-      } catch {
-        // best-effort
-      }
-    }, token);
-  }
-}
+/**
+ * Writes the solved token into the widget's response field(s) and fires the widget's
+ * callback (invisible widgets submit/advance the form from it). Returns false when the
+ * page has no response field to receive the token. It deliberately does NOT click any
+ * submit button — the apply flow does that once the form is actually filled in.
+ */
+async function injectCaptchaToken(page: Page, detection: CaptchaDetection, token: string): Promise<boolean> {
+  return page.evaluate(
+    ({ type, token }) => {
+      // tsx/esbuild wraps named inner functions in a __name() helper that doesn't exist in the browser.
+      (globalThis as unknown as { __name?: (f: unknown) => unknown }).__name ??= (f) => f;
+      const fieldSelector =
+        type === "HCAPTCHA"
+          ? "textarea[name='h-captcha-response'], textarea[name='g-recaptcha-response']"
+          : type === "TURNSTILE"
+            ? "input[name='cf-turnstile-response']"
+            : "textarea[name='g-recaptcha-response'], #g-recaptcha-response";
+      const widgetSelector = type === "HCAPTCHA" ? ".h-captcha" : type === "TURNSTILE" ? ".cf-turnstile" : ".g-recaptcha";
 
-async function trySubmitAfterTokenInjection(page: Page): Promise<void> {
-  // Some forms auto-submit when the CAPTCHA callback fires, but others need the
-  // user to click a submit button. Try clicking the nearest submit-looking control.
-  const submitControl = page.locator(
-    'button[type="submit"], input[type="submit"], button:has-text("Submit"), button:has-text("Continue"), button:has-text("Verify")'
+      const fields = Array.from(document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(fieldSelector));
+      for (const field of fields) {
+        field.value = token;
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+        field.dispatchEvent(new Event("change", { bubbles: true }));
+      }
+
+      const win = window as unknown as Record<string, unknown>;
+      const callbacks = new Set<(t: string) => void>();
+
+      // 1) Callback named by the data-callback attribute (may be a dotted path)
+      document.querySelectorAll(widgetSelector).forEach((widget) => {
+        const name = widget.getAttribute("data-callback");
+        if (!name) return;
+        const fn = name.split(".").reduce<unknown>((obj, key) => (obj as Record<string, unknown> | undefined)?.[key], win);
+        if (typeof fn === "function") callbacks.add(fn as (t: string) => void);
+      });
+
+      // 2) reCAPTCHA stores programmatic callbacks several levels deep in ___grecaptcha_cfg
+      if (type === "RECAPTCHA_V2") {
+        const seen = new Set<object>();
+        const walk = (node: unknown, depth: number) => {
+          if (!node || typeof node !== "object" || depth > 5 || node instanceof Node || seen.has(node)) return;
+          seen.add(node);
+          for (const [key, value] of Object.entries(node)) {
+            if (key === "callback" && typeof value === "function") callbacks.add(value as (t: string) => void);
+            else walk(value, depth + 1);
+          }
+        };
+        walk((win["___grecaptcha_cfg"] as { clients?: unknown } | undefined)?.clients, 0);
+      }
+
+      for (const callback of callbacks) {
+        try {
+          callback(token);
+        } catch {
+          // a throwing site callback must not discard an otherwise valid injection
+        }
+      }
+      return fields.length > 0 || callbacks.size > 0;
+    },
+    { type: detection.type, token }
   );
-  if ((await submitControl.count()) > 0) {
-    await submitControl.first().click().catch(() => {});
-  }
 }
 
 /* ── Tier 2: Checkbox click (reCAPTCHA v2) ────────────────────────────── */
