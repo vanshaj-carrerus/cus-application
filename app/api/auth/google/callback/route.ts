@@ -4,6 +4,8 @@ import { verifyOAuthState } from "@/lib/auth/session";
 import { connectDB } from "@/lib/db/mongodb";
 import { exchangeCodeForTokens } from "@/lib/services/googleAuth";
 import { GmailAccount } from "@/lib/models/GmailAccount";
+import { Candidate } from "@/lib/models/Candidate";
+import { User } from "@/lib/models/User";
 import { encryptSecret } from "@/lib/security/crypto";
 import { startGmailWatch } from "@/lib/services/gmailWatchService";
 
@@ -12,6 +14,22 @@ function redirectTo(req: NextRequest, path: string, status: "connected" | "error
   url.searchParams.set("gmail", status);
   if (message) url.searchParams.set("gmail_error", message);
   return NextResponse.redirect(url);
+}
+
+const DUPLICATE_HINT = "This Gmail address is already connected to another account. Each mailbox can be linked to only one candidate or user — use a different Gmail, or disconnect it from the other account first.";
+
+async function alreadyConnectedMessage(emailAddress: string, holder: { ownerType: string; ownerId: unknown }, viewerIsCandidate: boolean): Promise<string> {
+  // Staff may be told who holds it; a candidate must not learn another candidate's identity.
+  if (viewerIsCandidate) return DUPLICATE_HINT;
+  let owner = "another account";
+  if (holder.ownerType === "CANDIDATE") {
+    const c = await Candidate.findById(holder.ownerId).select("name");
+    owner = c ? `candidate ${c.name}` : "another candidate";
+  } else {
+    const u = await User.findById(holder.ownerId).select("email");
+    owner = u ? `user ${u.email}` : "another user";
+  }
+  return `${emailAddress} is already connected to ${owner}. Each mailbox can be linked to only one candidate or user — use a different Gmail, or disconnect it from ${owner} first.`;
 }
 
 export async function GET(req: NextRequest) {
@@ -43,6 +61,13 @@ export async function GET(req: NextRequest) {
     const ownerType = isCandidateFlow ? "CANDIDATE" : "USER";
     const ownerId = isCandidateFlow ? user.candidateId! : user.sub;
 
+    // One mailbox can belong to only one owner: Gmail push notifications and OTP lookups are routed by
+    // email address. Say so plainly instead of surfacing the raw duplicate-key error.
+    const inUse = await GmailAccount.findOne({ emailAddress: tokens.emailAddress.toLowerCase(), $or: [{ ownerType: { $ne: ownerType } }, { ownerId: { $ne: ownerId } }] });
+    // A mailbox its previous owner disconnected (the row is kept, marked DISCONNECTED) is free to move.
+    if (inUse?.status === "DISCONNECTED") await GmailAccount.deleteOne({ _id: inUse._id });
+    else if (inUse) return redirectTo(req, returnPath, "error", await alreadyConnectedMessage(tokens.emailAddress, inUse, isCandidateFlow));
+
     const account = await GmailAccount.findOneAndUpdate(
       { ownerType, ownerId },
       {
@@ -70,6 +95,10 @@ export async function GET(req: NextRequest) {
 
     return redirectTo(req, returnPath, "connected");
   } catch (err) {
+    // Lost a race with another connect of the same mailbox.
+    if (typeof err === "object" && err && (err as { code?: number }).code === 11000) {
+      return redirectTo(req, returnPath, "error", `${DUPLICATE_HINT}`);
+    }
     return redirectTo(req, returnPath, "error", err instanceof Error ? err.message : "unknown_error");
   }
 }

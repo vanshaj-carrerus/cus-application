@@ -10,6 +10,8 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Sparkles, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { JOB_BOARDS } from "@/lib/models/enums";
+import { ApplicationDetailsCard } from "@/components/shared/application-details-card";
+import { SavedAnswersPanel } from "@/components/shared/saved-answers-panel";
 
 interface CandidateDetail {
   _id: string;
@@ -85,6 +87,9 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
 
   const [profile, setProfile] = useState<AutoApplyProfileData>(EMPTY_PROFILE);
   const [profileId, setProfileId] = useState<string | null>(null);
+  // The comma-separated fields are edited as raw text and only split into lists on save. Deriving the
+  // input's value from the parsed list on every keystroke strips the trailing comma/space you just typed.
+  const [listText, setListText] = useState({ keywords: "", excludeKeywords: "", locations: "" });
   const [savingProfile, setSavingProfile] = useState(false);
   const [ingesting, setIngesting] = useState(false);
   const [ingestMessage, setIngestMessage] = useState<string | null>(null);
@@ -124,6 +129,11 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
         dailyApplyLimit: profileData.profile.dailyApplyLimit ?? 10,
         mode: profileData.profile.mode ?? "REVIEW_FIRST",
         requireCoverLetter: profileData.profile.requireCoverLetter ?? true,
+      });
+      setListText({
+        keywords: joinList(profileData.profile.keywords),
+        excludeKeywords: joinList(profileData.profile.excludeKeywords),
+        locations: joinList(profileData.profile.locations),
       });
     }
     setLoading(false);
@@ -199,10 +209,24 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
       const res = await fetch(`/api/candidates/${id}/auto-apply-profile`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(profile),
+        body: JSON.stringify({
+          ...profile,
+          keywords: splitList(listText.keywords),
+          excludeKeywords: splitList(listText.excludeKeywords),
+          locations: splitList(listText.locations),
+        }),
       });
       const data = await res.json();
       setProfileId(data.profile?._id ?? null);
+      if (data.profile) {
+        // Show the list as it was actually saved (trimmed, empty entries dropped).
+        setProfile((p) => ({ ...p, keywords: data.profile.keywords ?? [], excludeKeywords: data.profile.excludeKeywords ?? [], locations: data.profile.locations ?? [] }));
+        setListText({
+          keywords: joinList(data.profile.keywords),
+          excludeKeywords: joinList(data.profile.excludeKeywords),
+          locations: joinList(data.profile.locations),
+        });
+      }
     } finally {
       setSavingProfile(false);
     }
@@ -553,6 +577,10 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
         </CardContent>
       </Card>
 
+      <ApplicationDetailsCard endpoint={`/api/candidates/${id}`} audience="staff" />
+
+      <SavedAnswersPanel baseUrl={`/api/candidates/${id}/answers`} retryUrl={`/api/candidates/${id}/retry-waiting`} audience="staff" />
+
       <Card>
         <CardHeader>
           <CardTitle>Auto-Apply Settings</CardTitle>
@@ -566,18 +594,18 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
           <div>
             <label className="mb-1 block text-xs font-medium text-slate-600">Keywords (comma-separated — used as the job search query)</label>
             <Input
-              value={joinList(profile.keywords)}
-              onChange={(e) => setProfile((p) => ({ ...p, keywords: splitList(e.target.value) }))}
+              value={listText.keywords}
+              onChange={(e) => setListText((t) => ({ ...t, keywords: e.target.value }))}
               placeholder="senior react developer"
             />
           </div>
           <div>
             <label className="mb-1 block text-xs font-medium text-slate-600">Exclude keywords (comma-separated)</label>
-            <Input value={joinList(profile.excludeKeywords)} onChange={(e) => setProfile((p) => ({ ...p, excludeKeywords: splitList(e.target.value) }))} />
+            <Input value={listText.excludeKeywords} onChange={(e) => setListText((t) => ({ ...t, excludeKeywords: e.target.value }))} />
           </div>
           <div>
             <label className="mb-1 block text-xs font-medium text-slate-600">Locations (comma-separated)</label>
-            <Input value={joinList(profile.locations)} onChange={(e) => setProfile((p) => ({ ...p, locations: splitList(e.target.value) }))} />
+            <Input value={listText.locations} onChange={(e) => setListText((t) => ({ ...t, locations: e.target.value }))} />
           </div>
 
           <div>

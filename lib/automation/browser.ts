@@ -1,5 +1,6 @@
 import { chromium, type Browser, type BrowserContext } from "playwright";
 import { installCaptchaCapture } from "@/lib/automation/captcha";
+import { connectRemoteBrowser } from "@/lib/automation/remoteProxyBrowser";
 import type { JobBoard } from "@/lib/models/enums";
 import { JobBoardCredential } from "@/lib/models/JobBoardCredential";
 import { encryptSecret, decryptSecret } from "@/lib/security/crypto";
@@ -40,7 +41,36 @@ export interface ApplySession {
  * Most direct-ATS apply forms (Greenhouse/Lever/Workday/Taleo postings) need no login
  * at all — this only matters for board-gated flows (e.g. LinkedIn Easy Apply).
  */
-export async function openApplySession(candidateId: string, board: JobBoard | undefined): Promise<ApplySession> {
+/** True when the residential remote browser is configured, so a blocked run can be retried through it. */
+export function remoteBrowserAvailable(): boolean {
+  return !!process.env.BRIGHT_DATA_PASSWORD;
+}
+
+export async function openApplySession(candidateId: string, board: JobBoard | undefined, options: { remote?: boolean } = {}): Promise<ApplySession> {
+  // The remote residential browser (see remoteProxyBrowser.ts) is for sites whose bot check rejects our own
+  // browser's address. It is used when APPLY_REMOTE_BROWSER=true, or per run when the engine escalates a
+  // run that the site blocked. It reuses the remote default context, so a saved board login is restored by
+  // adding its cookies to that context.
+  if (options.remote || process.env.APPLY_REMOTE_BROWSER === "true") {
+    const remote = await connectRemoteBrowser();
+    const context = remote.contexts()[0] ?? (await remote.newContext());
+    await installCaptchaCapture(context);
+    let credentialId: Types.ObjectId | undefined;
+    if (board) {
+      const credential = await JobBoardCredential.findOne({ candidateId, board }).select("+sessionCookiesEncrypted");
+      if (credential?.sessionCookiesEncrypted) {
+        credentialId = credential._id as Types.ObjectId;
+        try {
+          const state = JSON.parse(decryptSecret(credential.sessionCookiesEncrypted)) as { cookies?: Parameters<BrowserContext["addCookies"]>[0] };
+          if (state.cookies?.length) await context.addCookies(state.cookies);
+        } catch {
+          // a stale or corrupt saved session just means starting signed out
+        }
+      }
+    }
+    return { browser: remote, context, credentialId };
+  }
+
   const browser = await chromium.launch();
 
   // Every context records Cloudflare/Turnstile challenge parameters before page scripts run
@@ -77,6 +107,30 @@ export async function persistSession(session: ApplySession): Promise<void> {
     { _id: session.credentialId },
     { $set: { sessionCookiesEncrypted: encryptSecret(JSON.stringify(storageState)), lastUsedAt: new Date() } }
   );
+}
+
+/**
+ * Remembers a signed-in job-board session (cookies + local storage) for this candidate, creating the
+ * board's credential if there isn't one yet. The next apply run restores it in openApplySession and
+ * starts already signed in, so the board's login — and any bot check that comes with it — happens once
+ * instead of on every application.
+ */
+export async function saveBoardSession(candidateId: string, board: JobBoard, context: BrowserContext, loginId: string, password: string): Promise<void> {
+  if (board === "OTHER") return;
+  const storageState = await context.storageState();
+  const set: Record<string, unknown> = {
+    sessionCookiesEncrypted: encryptSecret(JSON.stringify(storageState)),
+    status: "ACTIVE",
+    lastUsedAt: new Date(),
+    lastVerifiedAt: new Date(),
+  };
+  const existing = await JobBoardCredential.findOne({ candidateId, board }).select("_id");
+  if (existing) {
+    await JobBoardCredential.updateOne({ _id: existing._id }, { $set: set, $unset: { lastError: 1 } });
+    return;
+  }
+  if (!loginId || !password) return; // a credential row needs both; without them there is nothing valid to create
+  await JobBoardCredential.create({ candidateId, board, boardUsername: loginId, passwordEncrypted: encryptSecret(password), ...set });
 }
 
 export async function closeApplySession(session: ApplySession): Promise<void> {

@@ -12,17 +12,38 @@ function base64UrlEncode(input: string): string {
   return Buffer.from(input, "utf-8").toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-function buildMimeMessage(params: { from: string; to: string; subject: string; html: string }): string {
-  return [
-    `From: ${params.from}`,
-    `To: ${params.to}`,
-    `Subject: ${encodeSubject(params.subject)}`,
-    "MIME-Version: 1.0",
+export interface MailAttachment {
+  filename: string;
+  mimeType: string;
+  data: Buffer;
+}
+
+function buildMimeMessage(params: { from: string; to: string; subject: string; html: string; attachments?: MailAttachment[] }): string {
+  const head = [`From: ${params.from}`, `To: ${params.to}`, `Subject: ${encodeSubject(params.subject)}`, "MIME-Version: 1.0"];
+
+  if (!params.attachments?.length) {
+    return [...head, 'Content-Type: text/html; charset="UTF-8"', "Content-Transfer-Encoding: 7bit", "", params.html].join("\r\n");
+  }
+
+  // multipart/mixed: the HTML body first, then one base64 part per attachment (76-char lines as MIME requires).
+  const boundary = `cus_${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+  const parts = [
+    `--${boundary}`,
     'Content-Type: text/html; charset="UTF-8"',
     "Content-Transfer-Encoding: 7bit",
     "",
     params.html,
-  ].join("\r\n");
+    ...params.attachments.flatMap((file) => [
+      `--${boundary}`,
+      `Content-Type: ${file.mimeType}; name="${encodeSubject(file.filename)}"`,
+      "Content-Transfer-Encoding: base64",
+      `Content-Disposition: attachment; filename="${encodeSubject(file.filename)}"`,
+      "",
+      (file.data.toString("base64").match(/.{1,76}/g) ?? []).join("\r\n"),
+    ]),
+    `--${boundary}--`,
+  ];
+  return [...head, `Content-Type: multipart/mixed; boundary="${boundary}"`, "", ...parts].join("\r\n");
 }
 
 export interface SendHrEmailParams {
@@ -34,6 +55,7 @@ export interface SendHrEmailParams {
   jobId?: string;
   applicationId?: string;
   inReplyToThreadId?: string; // gmailThreadId, to reply within an existing thread
+  attachments?: MailAttachment[];
 }
 
 /**
@@ -45,7 +67,7 @@ export async function sendHrEmail(params: SendHrEmailParams) {
   await connectDB();
   const { gmail, account } = await getAuthenticatedGmailClient(params.gmailAccountId);
 
-  const raw = base64UrlEncode(buildMimeMessage({ from: account.emailAddress, to: params.to, subject: params.subject, html: params.html }));
+  const raw = base64UrlEncode(buildMimeMessage({ from: account.emailAddress, to: params.to, subject: params.subject, html: params.html, attachments: params.attachments }));
 
   const res = await gmail.users.messages.send({
     userId: "me",

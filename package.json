@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "workers": "tsx workers/start.ts",
-    "seed": "tsx scripts/seed.ts"
+    "seed": "tsx scripts/seed.ts",
+    "board-login": "tsx scripts/board-login.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1150.0",

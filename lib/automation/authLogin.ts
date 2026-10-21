@@ -3,7 +3,8 @@ import { randomBytes } from "crypto";
 import { JobBoardCredential, type IJobBoardCredential } from "@/lib/models/JobBoardCredential";
 import { decryptSecret, encryptSecret } from "@/lib/security/crypto";
 import { detectBoardFromUrl } from "@/lib/automation/browser";
-import { detectAuthWall, detectOtpWall } from "@/lib/automation/pageState";
+import { detectAuthWall, detectOtpWall, markOtpInputs } from "@/lib/automation/pageState";
+import { GmailAccount } from "@/lib/models/GmailAccount";
 import { fetchVerificationCode } from "@/lib/automation/otpRetriever";
 
 const LOGIN_TIMEOUT_MS = 15_000;
@@ -17,7 +18,7 @@ const LOGIN_TIMEOUT_MS = 15_000;
  *   3. the candidate's "default" credential (OTHER with no hostname) — one login
  *      they've said to try everywhere, unless something more specific overrides it
  */
-async function findCredentialForUrl(candidateId: string, pageUrl: string): Promise<IJobBoardCredential | null> {
+export async function findCredentialForUrl(candidateId: string, pageUrl: string): Promise<IJobBoardCredential | null> {
   let host: string;
   try {
     host = new URL(pageUrl).hostname.toLowerCase();
@@ -36,7 +37,10 @@ async function findCredentialForUrl(candidateId: string, pageUrl: string): Promi
     if (namedMatch) return namedMatch;
   }
 
-  return credentials.find((c) => c.board === "OTHER" && !c.hostname) ?? null;
+  // The candidate's "use everywhere" login. Looked up regardless of status: older versions marked it INVALID
+  // whenever any single site refused it, which says nothing about whether it is right for the next site.
+  const general = await JobBoardCredential.findOne({ candidateId, board: "OTHER", $or: [{ hostname: { $exists: false } }, { hostname: null }, { hostname: "" }] }).select("+passwordEncrypted");
+  return general ?? null;
 }
 
 export interface AutoLoginResult {
@@ -157,6 +161,11 @@ export async function attemptAutoSignup(
 ): Promise<AutoSignupResult> {
   if (!candidate.email) return { attempted: false, success: false };
 
+  // Never register accounts on aggregator job boards (LinkedIn, Indeed, ...). Opening accounts in a
+  // candidate's name through automation breaks those sites' terms and risks the candidate's identity
+  // on them; employer/ATS sites are different — an account there is a normal part of applying.
+  if (detectBoardFromUrl(page.url())) return { attempted: false, success: false };
+
   const signupToggle = page
     .locator(
       'a:has-text("Sign up"), button:has-text("Sign up"), a:has-text("Create account"), button:has-text("Create account"), a:has-text("Register"), button:has-text("Register")'
@@ -240,14 +249,6 @@ export async function attemptAutoSignup(
   return { attempted: true, success, loginId: candidate.email };
 }
 
-const OTP_INPUT_SELECTORS = [
-  'input[autocomplete="one-time-code"]',
-  'input[name*="otp" i]',
-  'input[name*="verification" i]',
-  'input[name*="code" i]',
-  'input[inputmode="numeric"]',
-];
-
 const OTP_SUBMIT_SELECTORS = [
   'button:has-text("Verify")',
   'button:has-text("Confirm")',
@@ -257,60 +258,87 @@ const OTP_SUBMIT_SELECTORS = [
   'input[type="submit"]',
 ];
 
+const RESEND_CODE = /resend|send (the |a )?(code|it) again|send again|didn'?t (get|receive)|new code/i;
+const RESEND_WAIT_MS = 60_000;
+
 export interface OtpChallengeResult {
   attempted: boolean;
   success: boolean;
   from?: string;
+  /** Why it failed, in terms a recruiter can act on. */
+  reason?: string;
 }
 
 /**
- * Clears an email-verification (one-time-code) step by reading the code from the
- * candidate's own OAuth-connected inbox and submitting it. This runs only after a
- * signup/login the automation just performed on the candidate's behalf, so the code
- * we wait for is the one that flow just triggered. Handles both a single code field
- * and the split one-box-per-digit layout many portals use.
+ * Clears an email-verification (one-time-code) step by reading the code from the candidate's own
+ * OAuth-connected inbox and submitting it. Runs right after a sign-in/sign-up the automation just
+ * performed on the candidate's behalf, so the code we wait for is the one that flow just triggered.
+ * Handles a single code field and the one-box-per-digit layout; if nothing arrives it asks the site
+ * to resend once before giving up.
  */
 export async function attemptOtpChallenge(page: Page, candidateId: string): Promise<OtpChallengeResult> {
   let host: string;
   try {
     host = new URL(page.url()).hostname.toLowerCase();
   } catch {
-    return { attempted: false, success: false };
+    return { attempted: false, success: false, reason: "page has no URL" };
   }
 
-  const otpInputs = page.locator(OTP_INPUT_SELECTORS.join(", "));
-  const inputCount = await otpInputs.count();
-  if (inputCount === 0) return { attempted: false, success: false };
+  const inputCount = await markOtpInputs(page);
+  if (inputCount === 0) return { attempted: false, success: false, reason: "no code field on the page" };
+  const otpInputs = page.locator("[data-cus-otp]");
 
-  // The code was sent when we submitted the signup/login moments ago; look a few
-  // minutes back so a code that landed just before we detected the prompt still counts.
-  const since = new Date(Date.now() - 3 * 60_000);
-  const { code, from } = await fetchVerificationCode({ candidateId, targetHost: host, since });
-  if (!code) return { attempted: true, success: false };
+  const mailbox = await GmailAccount.findOne({ ownerType: "CANDIDATE", ownerId: candidateId, status: { $ne: "DISCONNECTED" } });
+  if (!mailbox) {
+    return { attempted: true, success: false, reason: "the site asked for an email code but this candidate has no Gmail connected (Portal → Email Access)" };
+  }
+
+  // The code was sent when we submitted the sign-in/sign-up moments ago; look a few minutes back so a
+  // code that landed just before we noticed the prompt still counts.
+  let since = new Date(Date.now() - 3 * 60_000);
+  let found = await fetchVerificationCode({ candidateId, targetHost: host, since });
+
+  if (!found.code) {
+    const resend = page.getByRole("button", { name: RESEND_CODE }).or(page.getByRole("link", { name: RESEND_CODE })).first();
+    if ((await resend.count()) > 0 && (await resend.isVisible().catch(() => false))) {
+      await resend.click().catch(() => undefined);
+      since = new Date(Date.now() - 15_000);
+      found = await fetchVerificationCode({ candidateId, targetHost: host, since, timeoutMs: RESEND_WAIT_MS });
+    }
+  }
+  if (!found.code) {
+    return { attempted: true, success: false, reason: `no verification code reached ${mailbox.emailAddress} in time (is that the address the account was registered with?)` };
+  }
+  const code = found.code;
 
   if (inputCount > 1 && inputCount >= code.length) {
-    // One box per character.
-    for (let i = 0; i < code.length; i++) {
-      await otpInputs.nth(i).fill(code[i]).catch(() => undefined);
-    }
+    // One box per character: focus the first and type, so the page's own auto-advance moves along.
+    await otpInputs.first().click().catch(() => undefined);
+    await page.keyboard.type(code, { delay: 60 });
   } else {
     await otpInputs.first().fill(code).catch(() => undefined);
   }
 
   let clicked = false;
-  for (const selector of OTP_SUBMIT_SELECTORS) {
-    const locator = page.locator(selector).first();
-    if ((await locator.count()) > 0 && (await locator.isVisible().catch(() => false))) {
-      await Promise.allSettled([page.waitForLoadState("networkidle", { timeout: LOGIN_TIMEOUT_MS }), locator.click()]);
-      clicked = true;
-      break;
+  await page.waitForTimeout(500);
+  if (await detectOtpWall(page)) {
+    for (const selector of OTP_SUBMIT_SELECTORS) {
+      const locator = page.locator(selector).first();
+      if ((await locator.count()) > 0 && (await locator.isVisible().catch(() => false))) {
+        await Promise.allSettled([page.waitForLoadState("networkidle", { timeout: LOGIN_TIMEOUT_MS }), locator.click()]);
+        clicked = true;
+        break;
+      }
+    }
+    if (!clicked) {
+      await otpInputs.last().press("Enter").catch(() => undefined);
+      await page.waitForLoadState("networkidle", { timeout: LOGIN_TIMEOUT_MS }).catch(() => undefined);
     }
   }
-  if (!clicked) {
-    await otpInputs.last().press("Enter").catch(() => undefined);
-    await page.waitForLoadState("networkidle", { timeout: LOGIN_TIMEOUT_MS }).catch(() => undefined);
-  }
+  await page.waitForTimeout(1_000);
 
   const stillOtp = await detectOtpWall(page);
-  return { attempted: true, success: !stillOtp, from };
+  return stillOtp
+    ? { attempted: true, success: false, from: found.from, reason: "the site rejected the verification code" }
+    : { attempted: true, success: true, from: found.from };
 }

@@ -13,6 +13,9 @@ import { parseGmailMessage, extractEmailAddress } from "@/lib/services/gmailPars
 
 const POLL_INTERVAL_MS = 5_000;
 const DEFAULT_TIMEOUT_MS = 90_000;
+// A code from a sender whose domain doesn't match the site (ATSs send from their own mail domain) is
+// accepted once it has sat this long without a better match arriving — not after the full timeout.
+const FALLBACK_GRACE_MS = 12_000;
 
 /** Rough eTLD+1 so a code from "no-reply@mail.greenhouse.io" matches host "boards.greenhouse.io". */
 function registrableDomain(host: string): string {
@@ -45,6 +48,14 @@ export function extractVerificationCode(subject: string, body: string): string |
   const keywordedAlnum = /(?:code|otp|verification|passcode)\D{0,30}?\b([A-Z0-9]{5,8})\b/;
   const am = text.match(keywordedAlnum);
   if (am && /[0-9]/.test(am[1])) return am[1];
+
+  // Mixed-case letters+digits codes (Greenhouse's 8-character security code): a 6-10 character token that has BOTH a
+  // letter and a digit, shortly after the word "code". Tokens that are part of an email address or URL don't count.
+  const noUrls = text.replace(/https?:\/\/\S+/gi, " ");
+  for (const m of noUrls.matchAll(/(?<![@.\w-])(?=[A-Za-z0-9]*\d)(?=[A-Za-z0-9]*[A-Za-z])[A-Za-z0-9]{6,10}(?![@\w-]|\.\w)/g)) {
+    const before = noUrls.slice(Math.max(0, (m.index ?? 0) - 160), m.index ?? 0);
+    if (/\bcode\b/i.test(before)) return m[0];
+  }
 
   // Last resort: a lone 6-digit code in the subject line ("123456 is your code").
   const six = subject.match(/\b(\d{6})\b/);
@@ -84,6 +95,7 @@ export async function fetchVerificationCode(opts: {
   const deadline = Date.now() + timeoutMs;
   const seen = new Set<string>();
   let fallback: OtpFetchResult | null = null;
+  let fallbackSince = 0;
 
   while (Date.now() < deadline) {
     const list = await gmail.users.messages
@@ -111,9 +123,13 @@ export async function fetchVerificationCode(opts: {
         return { code, from: fromAddr, subject: parsed.subject };
       }
       // Otherwise remember the first code-bearing mail and keep looking for a match.
-      fallback ??= { code, from: fromAddr, subject: parsed.subject };
+      if (!fallback) {
+        fallback = { code, from: fromAddr, subject: parsed.subject };
+        fallbackSince = Date.now();
+      }
     }
 
+    if (fallback && Date.now() - fallbackSince >= FALLBACK_GRACE_MS) return fallback;
     if (Date.now() >= deadline) break;
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }

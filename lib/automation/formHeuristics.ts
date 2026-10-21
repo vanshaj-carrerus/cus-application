@@ -6,7 +6,7 @@ import type { ICandidate } from "@/lib/models/Candidate";
 // inside an <iframe>, not the top-level document.
 type Interactable = Page | Frame;
 
-type AtsType = "GREENHOUSE" | "LEVER" | "WORKDAY" | "TALEO" | "GENERIC";
+type AtsType = "GREENHOUSE" | "LEVER" | "WORKDAY" | "TALEO" | "ASHBY" | "GENERIC";
 
 function detectAts(url: string): AtsType {
   const host = url.toLowerCase();
@@ -14,6 +14,7 @@ function detectAts(url: string): AtsType {
   if (host.includes("lever.co")) return "LEVER";
   if (host.includes("myworkdayjobs.com") || host.includes("workday.com")) return "WORKDAY";
   if (host.includes("taleo.net")) return "TALEO";
+  if (host.includes("ashbyhq.com")) return "ASHBY";
   return "GENERIC";
 };
 
@@ -44,6 +45,14 @@ const SELECTORS: Record<AtsType, Record<string, string[]>> = {
     email: ['input[data-automation-id*="email" i]'],
     phone: ['input[data-automation-id*="phone" i]'],
     resumeFile: ['input[type="file"][data-automation-id*="resume" i]', 'input[type="file"]'],
+  },
+  // Ashby's two built-in fields have stable names; custom questions get UUID names, so phone is
+  // matched by input type, and the resume is the (visually hidden) file input.
+  ASHBY: {
+    fullName: ['input[name="_systemfield_name"]'],
+    email: ['input[name="_systemfield_email"]'],
+    phone: ['input[type="tel"]'],
+    resumeFile: ['input[type="file"]'],
   },
   TALEO: {
     firstName: ['input[id*="firstName" i]'],
@@ -112,10 +121,24 @@ export async function hasVisibleFormFields(ctx: Interactable): Promise<boolean> 
       const NOISE = /search|keyword|newsletter|subscribe|coupon|captcha|cookie|consent|filter/i;
       const IDENTITY = /name|e-?mail|phone|mobile|resume|cv|linkedin/i;
 
-      const groups = new Map<Element | null, { fields: number; identity: boolean; file: boolean; password: boolean }>();
-      for (const el of Array.from(document.querySelectorAll<HTMLInputElement>("input, textarea, select"))) {
-        if (el.closest('header, nav, footer, [role="banner"], [role="navigation"], [role="search"], [aria-hidden="true"], [hidden]')) continue;
-        const form = el.closest("form");
+      // Sites built on web components (Salesforce-based career sites, some Workday tenants) keep their fields inside
+      // shadow roots, which document.querySelectorAll cannot see. Walk into every open shadow root as well.
+      const deepAll = <T extends Element>(selector: string, root: ParentNode = document): T[] => {
+        const found: T[] = Array.from(root.querySelectorAll<T>(selector));
+        for (const host of Array.from(root.querySelectorAll("*"))) {
+          const shadow = (host as HTMLElement).shadowRoot;
+          if (shadow) found.push(...deepAll<T>(selector, shadow));
+        }
+        return found;
+      };
+
+      const looksLikeHoneypot = (el: Element) => /honeypot|honey-pot|beecatcher|bot-?trap|spam-?trap/i.test(`${(el as HTMLInputElement).name ?? ""} ${el.id ?? ""} ${el.getAttribute("data-automation-id") ?? ""}`);
+      const groups = new Map<Element | ShadowRoot | null, { fields: number; identity: boolean; file: boolean; password: boolean }>();
+      for (const el of deepAll<HTMLInputElement>("input, textarea, select")) {
+        if (el.closest('header, nav, footer, [role="banner"], [role="navigation"], [role="search"], [aria-hidden="true"], [hidden]') || looksLikeHoneypot(el)) continue;
+        // Fields inside the same shadow root belong together even when there is no <form> element around them.
+        const root = el.getRootNode();
+        const form = el.closest("form") ?? (root instanceof ShadowRoot ? root : null);
         const group = groups.get(form) ?? { fields: 0, identity: false, file: false, password: false };
         groups.set(form, group);
 
@@ -127,7 +150,7 @@ export async function hasVisibleFormFields(ctx: Interactable): Promise<boolean> 
         if (type === "file") {
           // File inputs are routinely visually hidden behind a custom button, so judge the
           // surrounding form (or the page) instead of the input itself.
-          if (!form || isRendered(form)) group.file = true;
+          if (!form || form instanceof ShadowRoot || isRendered(form)) group.file = true;
           continue;
         }
         if (SKIP_TYPES.has(type) || !isRendered(el)) continue;
@@ -216,34 +239,123 @@ async function firstVisibleMatch(ctx: Interactable, selectors: string[]): Promis
   return null;
 }
 
-// A bare :has-text("Apply") matches "Applications", "Apply filters", "Applicant login"... so the
-// generic fallback only accepts controls whose whole accessible name is an apply call-to-action.
-const APPLY_CONTROL_NAME =
-  /^s*(easys+|quicks+)?apply(s+(now|today|here|online|fors+(thiss+)?(job|position|role)|tos+(thiss+)?(job|position|role)|ons+(thes+)?companys+(site|website)))?s*[→>»›]*s*$/i;
-
-async function firstVisibleRole(ctx: Interactable, name: RegExp): Promise<Locator | null> {
-  for (const role of ["button", "link"] as const) {
-    const locator = ctx.getByRole(role, { name }).first();
-    if ((await locator.count()) > 0 && (await locator.isVisible().catch(() => false))) return locator;
-  }
-  return null;
+/**
+ * Every visible clickable control on the page, in reading order — what the AI is shown (as a list to
+ * choose from, not a picture to guess coordinates on) when the page isn't one the heuristics know.
+ */
+export async function listClickables(ctx: Interactable, limit = 45): Promise<string[]> {
+  return ctx
+    .evaluate((max) => {
+      const rendered = (el: Element) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
+      const seen = new Set<string>();
+      const out: string[] = [];
+      for (const el of Array.from(document.querySelectorAll("a[href], button, [role=button], input[type=submit], input[type=button]"))) {
+        if (!rendered(el)) continue;
+        // mailto:/tel: open no page, and chat links (WhatsApp, Telegram, Skype…) lead to a messenger, not an application.
+        if (/^(mailto:|tel:|sms:|skype:)|(^|\/\/)(api\.whatsapp\.com|wa\.me|web\.whatsapp\.com|t\.me|telegram\.me|m\.me)\b/i.test(el.getAttribute("href") ?? "")) continue;
+        const text = (((el as HTMLElement).innerText || (el as HTMLInputElement).value || el.getAttribute("aria-label") || el.getAttribute("title") || "") as string).replace(/\s+/g, " ").trim();
+        if (!text || text.length > 70 || seen.has(text.toLowerCase())) continue;
+        seen.add(text.toLowerCase());
+        out.push(text);
+        if (out.length >= max) break;
+      }
+      return out;
+    }, limit)
+    .catch(() => []);
 }
 
 /**
- * The initial "open the application form" control on a job description/listing
- * page — distinct from the real submit button. Many career sites' applicationUrl
- * points at a JD page, not the form itself; this is what gets you from one to the other.
+ * Finds the control that starts the application: "Apply", "Apply Now", "Easy Apply", "Apply on the
+ * website", "Apply on company site", "I'm interested"... Every visible clickable is scored on its
+ * own text (not on a fixed list of selectors), so wording the list never anticipated still works,
+ * while look-alikes — "Applications", "Apply filters", "Applicant login", "Applied" — are rejected.
+ * Returns null only when nothing on the page reads like an apply control.
  */
 export async function findApplyButton(ctx: Interactable): Promise<Locator | null> {
-  const exact = await firstVisibleMatch(ctx, [
-    'a:has-text("Apply Now")',
-    'button:has-text("Apply Now")',
-    'a:has-text("Apply for this job")',
-    'button:has-text("Apply for this job")',
-    'a:has-text("Apply to this position")',
-    'button:has-text("Apply to this position")',
-  ]);
-  return exact ?? (await firstVisibleRole(ctx, APPLY_CONTROL_NAME));
+  const found = await ctx
+    .evaluate(() => {
+      document.querySelectorAll("[data-cus-apply]").forEach((e) => e.removeAttribute("data-cus-apply"));
+      const rendered = (el: Element) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
+      const textOf = (el: Element) => (((el as HTMLElement).innerText || (el as HTMLInputElement).value || el.getAttribute("aria-label") || el.getAttribute("title") || "") as string).replace(/\s+/g, " ").trim();
+
+      const NEGATIVE = /\b(with|using|via|through)\s+(linkedin|indeed|google|facebook|apple|microsoft|twitter|github|glassdoor)\b|\b(applied|applying|filters?|applications?|applicants?|application status|my applications|how to apply|apply later|saved|alerts?|similar|related|other jobs|sign ?in|log ?in|register|sign ?up|login|help)\b/i;
+      // Whole-text matches: what the control says is the call to action.
+      // The same call to action in the languages job sites most often come in (French, Spanish, German, Portuguese,
+      // Italian, Dutch, Swedish, Danish, Polish) — TEKsystems' French page says "Postuler maintenant".
+      const FOREIGN = /^(postuler( maintenant| ici| en ligne)?|candidater( maintenant)?|soumettre (sa|ma|votre) candidature|je postule|aplicar( ahora| ya)?|postular(me)?( ahora)?|solicitar( ahora)?|inscribirse|bewerben|jetzt bewerben|online bewerben|zur bewerbung|candidatar(-se)?( agora)?|candidati( ora| adesso)?|invia (la )?candidatura|solliciteer|nu solliciteren|ansök( nu)?|ansøg( nu)?|aplikuj|zgłoś się)( ?[→>»›]+)?$/i;
+      const STRONG = /^(easy |quick |instant|1-click |one[- ]click )?apply( now| today| here| online| externally| directly| to (this )?(job|position|role|vacancy)| for (this )?(job|position|role|vacancy|it)| with (your )?(resume|cv|profile)| (on|via|at|through) (the |their |this |our |company |employer'?s? )*(web ?site|site|careers?( page| site| portal)?|portal|job board|page|ats))?( ?[→>»›]+)?$/i;
+      const SOFT = /^(i'?m interested|i am interested|interested|submit (your )?(resume|cv|application)|send (your )?(resume|cv|application)|start (your )?application|begin application|continue to (application|apply)|go to application|view application|apply for this (job|position)|apply to this (job|position)|visit (the )?(employer|company) (site|website|page)|go to (the )?(employer|company|official) (site|website))( ?[→>»›]+)?$/i;
+
+      type Scored = { el: Element; score: number };
+      const scored: Scored[] = [];
+      for (const el of Array.from(document.querySelectorAll("a[href], button, [role=button], input[type=submit], input[type=button]"))) {
+        if (!rendered(el)) continue;
+        if (/^(mailto:|tel:)/i.test(el.getAttribute("href") ?? "")) continue;
+        const text = textOf(el);
+        if (!text || text.length > 60) continue;
+        if (NEGATIVE.test(text) && !STRONG.test(text)) continue;
+
+        let score = 0;
+        if (STRONG.test(text)) score = /^(apply|apply now)$/i.test(text) ? 90 : 85;
+        else if (FOREIGN.test(text)) score = 82;
+        else if (SOFT.test(text)) score = 70;
+        else if (/\bapply\b/i.test(text) && text.length <= 28 && !NEGATIVE.test(text)) score = 50;
+        if (score === 0) continue;
+
+        // Controls in the main content beat the same words in the page chrome or a similar-jobs rail.
+        if (el.closest("header, nav, footer, aside, [role=navigation], [role=complementary]")) score -= 12;
+        const href = (el as HTMLAnchorElement).href ?? "";
+        if (/mailto:|javascript:void|#$/.test(href) && !/^button$/i.test(el.tagName)) score -= 5;
+        // The very first match in reading order is usually the primary one; later duplicates in a jobs list are not.
+        score -= Math.min(10, scored.length * 2);
+        scored.push({ el, score });
+      }
+      if (scored.length === 0) return false;
+      scored.sort((a, b) => b.score - a.score);
+      scored[0].el.setAttribute("data-cus-apply", "1");
+      return true;
+    })
+    .catch(() => false);
+
+  return found ? ctx.locator('[data-cus-apply="1"]').first() : null;
+}
+
+/**
+ * Handles a "upload your resume" step: wizards often open with nothing but a drop-zone. Sets the resume on a file
+ * input directly when one exists (even a hidden one), otherwise finds the "click to browse & upload" area — which
+ * is usually a plain element, not a button — and answers the file picker it opens. True once a file went in.
+ */
+export async function attachResumeToUploadStep(page: Page, resumePath: string): Promise<boolean> {
+  const input = page.locator('input[type="file"]');
+  if ((await input.count()) > 0) {
+    try {
+      await input.first().setInputFiles(resumePath, { timeout: 8_000 });
+      return true;
+    } catch {
+      // fall through to the drop-zone route
+    }
+  }
+
+  const found = await page
+    .evaluate(() => {
+      document.querySelectorAll("[data-cus-upload]").forEach((e) => e.removeAttribute("data-cus-upload"));
+      const rendered = (el: Element) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
+      const ZONE = /(click to )?(browse|upload|attach|choose|select)\b.{0,40}\b(files?|resume|résumé|cv|documents?)|drop (your )?(resume|cv|files?)|upload (your )?(resume|cv)/i;
+      const hits = Array.from(document.querySelectorAll<HTMLElement>("button, a, label, [role=button], div, span, p"))
+        .filter((el) => rendered(el) && ZONE.test((el.innerText ?? "").trim()) && (el.innerText ?? "").trim().length < 90)
+        .sort((a, b) => (a.innerText ?? "").length - (b.innerText ?? "").length);
+      if (!hits.length) return false;
+      hits[0].setAttribute("data-cus-upload", "1");
+      return true;
+    })
+    .catch(() => false);
+  if (!found) return false;
+
+  const zone = page.locator('[data-cus-upload="1"]').first();
+  const [chooser] = await Promise.all([page.waitForEvent("filechooser", { timeout: 7_000 }).catch(() => null), zone.click({ timeout: 5_000 }).catch(() => undefined)]);
+  if (!chooser) return false;
+  await chooser.setFiles(resumePath);
+  return true;
 }
 
 /** The terminal control that actually submits the application — never matches "Apply" text. */

@@ -1,12 +1,13 @@
-import type { BrowserContext, Page } from "playwright";
+import type { BrowserContext, Frame, Page } from "playwright";
 import { env } from "@/lib/env";
+import { VISION_MODELS } from "@/lib/adapters/visionAdapter";
 
 /* ────────────────────────────────────────────────────────────────────────────
  * CAPTCHA Detection
  * ────────────────────────────────────────────────────────────────────────── */
 
 /** The type of CAPTCHA detected on the page, or null if none found. */
-export type CaptchaType = "RECAPTCHA_V2" | "HCAPTCHA" | "TURNSTILE" | "UNKNOWN";
+export type CaptchaType = "RECAPTCHA_V2" | "HCAPTCHA" | "TURNSTILE" | "IMAGE_TEXT" | "UNKNOWN";
 
 export interface CaptchaDetection {
   detected: boolean;
@@ -22,6 +23,8 @@ export interface CaptchaDetection {
   challengePage: boolean;
   /** Cloudflare "you have been blocked" page: nothing on it can be solved. */
   hardBlock: boolean;
+  /** The frame that holds the widget (main frame or an iframe-embedded form); tokens go back into this one. */
+  frame?: Frame;
 }
 
 const NOT_DETECTED: CaptchaDetection = {
@@ -76,6 +79,10 @@ const CAPTURE_INIT_SCRIPT = `(() => {
 
 /** Must be called on every browser context before navigating (see browser.ts). */
 export async function installCaptchaCapture(context: BrowserContext): Promise<void> {
+  // tsx/esbuild wraps named functions in a __name() helper that doesn't exist inside the browser, so any
+  // page.evaluate() that contains a named inner function throws "__name is not defined". Defining it
+  // in every page makes that class of bug impossible instead of patching each call site.
+  await context.addInitScript("window.__name = window.__name || function (f) { return f; };");
   await context.addInitScript(CAPTURE_INIT_SCRIPT);
 }
 
@@ -100,14 +107,52 @@ export async function detectCaptcha(page: Page): Promise<boolean> {
   return detection.detected && !hasUsableToken(page, detection);
 }
 
+/**
+ * Looks for a CAPTCHA in the main document and in every embedded frame — ATS forms are often
+ * iframed (Greenhouse/Workable embeds etc.) and their widget lives inside that iframe, not on
+ * the top-level page. The captcha providers' own iframes are skipped; they hold the widget UI,
+ * not the page's response field.
+ */
 export async function detectCaptchaDetails(page: Page): Promise<CaptchaDetection> {
-  const scan = await page
-    .evaluate(() => {
+  const mainFrame = page.mainFrame();
+  const main = await scanFrame(mainFrame, true);
+  if (main.hardBlock || main.challengePage) return main;
+
+  const found: CaptchaDetection[] = main.detected ? [main] : [];
+  for (const frame of page.frames()) {
+    if (frame === mainFrame || frame.isDetached() || /recaptcha|hcaptcha.com|challenges.cloudflare.com/i.test(frame.url())) continue;
+    const detection = await scanFrame(frame, false);
+    if (detection.detected) found.push(detection);
+  }
+  // A concrete widget (with a sitekey to solve) beats a vague "looks like a captcha" text hit.
+  return found.find((d) => d.type !== "UNKNOWN") ?? found[0] ?? NOT_DETECTED;
+}
+
+interface RawScan {
+  hardBlock: boolean;
+  challengePage: boolean;
+  capturedSiteKey: string | null;
+  recaptcha: { siteKey: string | null; invisible: boolean; enterprise: boolean; src: string | null } | null;
+  hcaptcha: { siteKey: string | null; invisible: boolean; src: string | null } | null;
+  turnstile: { siteKey: string | null; src: string | null } | null;
+  genericIframe: boolean;
+  /** A "type the characters in the picture" captcha: an image plus the box to type it into. */
+  imageCaptcha: { filled: boolean } | null;
+  bodyText: string;
+  tokens: { recaptcha: boolean; hcaptcha: boolean; turnstile: boolean };
+}
+
+async function scanFrame(frame: Frame, isMain: boolean): Promise<CaptchaDetection> {
+  const scan = await frame
+    .evaluate((isMain) => {
       // tsx/esbuild wraps named inner functions in a __name() helper that doesn't exist in the browser.
       (globalThis as unknown as { __name?: (f: unknown) => unknown }).__name ??= (f) => f;
       const win = window;
       const all = (sel: string) => Array.from(document.querySelectorAll<HTMLElement>(sel));
-      const hasValue = (sel: string) => all(sel).some((el) => ((el as HTMLInputElement).value ?? "").trim().length > 0);
+      const hasAll = (sel: string) => {
+        const els = all(sel);
+        return els.length > 0 && els.every((el) => ((el as HTMLInputElement).value ?? "").trim().length > 0);
+      };
       const query = (src: string) => {
         try {
           return new URL(src, location.href).searchParams;
@@ -123,8 +168,14 @@ export async function detectCaptchaDetails(page: Page): Promise<CaptchaDetection
         }
       };
 
-      // --- reCAPTCHA ---
-      const rcDiv = all(".g-recaptcha[data-sitekey]")[0];
+      // hCaptcha is very often rendered inside a "g-recaptcha"-classed element (its compatibility mode), and
+      // its sitekeys are UUIDs while reCAPTCHA's start with "6L" — so the class name alone proves nothing.
+      const UUID_KEY = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const hcScript = !!document.querySelector('script[src*="hcaptcha.com"]');
+      const anyKeyed = all("[data-sitekey]");
+      const rcCandidate = all(".g-recaptcha[data-sitekey]")[0];
+      const rcDivIsHc = !!rcCandidate && (UUID_KEY.test(rcCandidate.getAttribute("data-sitekey") ?? "") || (hcScript && !document.querySelector('script[src*="recaptcha/"]')));
+      const rcDiv = rcDivIsHc ? undefined : rcCandidate;
       const rcFrame = all('iframe[src*="recaptcha/api2/anchor"], iframe[src*="recaptcha/enterprise/anchor"]')[0] as HTMLIFrameElement | undefined;
       // reCAPTCHA v3 loads api.js?render=<sitekey> and shows only a corner badge (an invisible
       // "anchor" iframe). There is nothing to solve on the page — the site scores the session
@@ -134,11 +185,15 @@ export async function detectCaptchaDetails(page: Page): Promise<CaptchaDetection
         .find((r) => r && r !== "explicit");
       let recaptcha: { siteKey: string | null; invisible: boolean; enterprise: boolean; src: string | null } | null = null;
       if (rcDiv) {
+        const siteKey = rcDiv.getAttribute("data-sitekey");
+        // The anchor frame for THIS widget's key decides enterprise vs standard (a page can carry several).
+        const own = all('iframe[src*="recaptcha/"]').find((f) => query((f as HTMLIFrameElement).src).get("k") === siteKey) as HTMLIFrameElement | undefined;
         recaptcha = {
-          siteKey: rcDiv.getAttribute("data-sitekey"),
-          invisible: rcDiv.getAttribute("data-size") === "invisible",
-          enterprise: !!rcFrame && rcFrame.src.includes("/enterprise/"),
-          src: rcFrame?.src ?? null,
+          siteKey,
+          // A button/submit carrying the sitekey is the "invisible" flavour: the challenge fires when it is pressed.
+          invisible: rcDiv.getAttribute("data-size") === "invisible" || /^(button|input)$/i.test(rcDiv.tagName),
+          enterprise: !!(own ?? rcFrame)?.src.includes("/enterprise/"),
+          src: (own ?? rcFrame)?.src ?? null,
         };
       } else if (rcFrame && !v3Render) {
         const q = query(rcFrame.src);
@@ -146,10 +201,11 @@ export async function detectCaptchaDetails(page: Page): Promise<CaptchaDetection
       }
 
       // --- hCaptcha ---
-      const hcDiv = all(".h-captcha[data-sitekey]")[0];
+      const hcDiv = all(".h-captcha[data-sitekey]")[0] ?? (rcDivIsHc ? rcCandidate : undefined) ?? anyKeyed.find((e) => UUID_KEY.test(e.getAttribute("data-sitekey") ?? ""));
       const hcFrame = all('iframe[src*="hcaptcha.com"]')[0] as HTMLIFrameElement | undefined;
+      const hcField = all("textarea[name='h-captcha-response'], input[name='h-captcha-response']").length > 0;
       const hcaptcha =
-        hcDiv || hcFrame
+        hcDiv || hcFrame || (hcScript && hcField)
           ? {
               siteKey: hcDiv?.getAttribute("data-sitekey") ?? (hcFrame ? hash(hcFrame.src).get("sitekey") : null),
               invisible: hcDiv?.getAttribute("data-size") === "invisible",
@@ -160,10 +216,15 @@ export async function detectCaptchaDetails(page: Page): Promise<CaptchaDetection
       // --- Cloudflare Turnstile ---
       const tsDiv = all(".cf-turnstile[data-sitekey]")[0];
       const tsFrame = all('iframe[src*="challenges.cloudflare.com"]')[0] as HTMLIFrameElement | undefined;
+      const captured = (win as unknown as { __cusTurnstile?: { sitekey?: string } }).__cusTurnstile;
+      // Turnstile is often rendered from script with no .cf-turnstile element and an iframe we cannot see
+      // into. What always remains: the script, the response field, and the sitekey our render hook captured.
+      const tsScript = !!document.querySelector('script[src*="challenges.cloudflare.com/turnstile"]');
+      const tsField = all("input[name='cf-turnstile-response'], textarea[name='cf-turnstile-response']").length > 0;
       const turnstile =
-        tsDiv || tsFrame
+        tsDiv || tsFrame || (tsScript && (tsField || captured?.sitekey))
           ? {
-              siteKey: tsDiv?.getAttribute("data-sitekey") ?? tsFrame?.src.match(/\/(0x[0-9A-Za-z_-]+)\//)?.[1] ?? null,
+              siteKey: tsDiv?.getAttribute("data-sitekey") ?? captured?.sitekey ?? tsFrame?.src.match(/\/(0x[0-9A-Za-z_-]+)\//)?.[1] ?? null,
               src: tsFrame?.src ?? null,
             }
           : null;
@@ -171,15 +232,15 @@ export async function detectCaptchaDetails(page: Page): Promise<CaptchaDetection
       // Cloudflare interstitial: title is the reliable marker; _cf_chl_opt / #challenge-form
       // exist only on challenge pages (the cdn-cgi/challenge-platform script alone is also
       // loaded on ordinary Cloudflare-fronted sites, so it is NOT used as a signal).
-      const captured = (win as unknown as { __cusTurnstile?: { sitekey?: string } }).__cusTurnstile;
       const challengePage =
-        /just a moment|checking your browser|verifying you are human/i.test(document.title) ||
-        "_cf_chl_opt" in window ||
-        !!document.querySelector("#challenge-form, #challenge-running, #challenge-stage");
+        isMain &&
+        (/just a moment|checking your browser|verifying you are human/i.test(document.title) ||
+          "_cf_chl_opt" in window ||
+          !!document.querySelector("#challenge-form, #challenge-running, #challenge-stage"));
 
       // "Attention Required! | Cloudflare" / "Sorry, you have been blocked" (error 1020 etc.):
       // the site refused this IP/browser outright — there is no widget to solve.
-      const hardBlock = /attention required.*cloudflare|access denied/i.test(document.title) && /sorry, you have been blocked|cloudflare ray id/i.test(document.body?.innerText ?? "");
+      const hardBlock = isMain && /attention required.*cloudflare|access denied/i.test(document.title) && /sorry, you have been blocked|cloudflare ray id/i.test(document.body?.innerText ?? "");
 
       return {
         hardBlock,
@@ -188,18 +249,46 @@ export async function detectCaptchaDetails(page: Page): Promise<CaptchaDetection
         recaptcha,
         hcaptcha,
         turnstile,
-        genericIframe: all('iframe[title*="captcha" i]').length > 0,
-        bodyText: document.body?.innerText ?? "",
+        // Only a captcha iframe a person could actually see counts. Sites like LinkedIn load a hidden,
+        // zero-size "reCAPTCHA" iframe on every page purely to score the session — it is not a challenge.
+        imageCaptcha: (() => {
+          document.querySelectorAll("[data-cus-captcha-img], [data-cus-captcha-input]").forEach((e) => {
+            e.removeAttribute("data-cus-captcha-img");
+            e.removeAttribute("data-cus-captcha-input");
+          });
+          const visible = (e: Element) => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== "hidden";
+          const img = all("img").find((i) => visible(i) && /captcha/i.test(`${(i as HTMLImageElement).src} ${i.id} ${i.className?.toString?.() ?? ""} ${(i as HTMLImageElement).alt}`) && (i as HTMLImageElement).width >= 40);
+          if (!img) return null;
+          const label = (el: HTMLInputElement) => `${el.name} ${el.id} ${el.placeholder} ${el.getAttribute("aria-label") ?? ""} ${el.labels?.[0]?.textContent ?? ""}`;
+          const inputs = all("input").filter((i) => visible(i) && ["text", "tel", "number", ""].includes(((i as HTMLInputElement).type ?? "").toLowerCase()));
+          const input = (inputs.find((i) => /captcha|security[\s_-]?code|characters|letters shown|type the (text|code)/i.test(label(i as HTMLInputElement))) ?? inputs.find((i) => img.compareDocumentPosition(i) & Node.DOCUMENT_POSITION_FOLLOWING)) as HTMLInputElement | undefined;
+          if (!input) return null;
+          img.setAttribute("data-cus-captcha-img", "1");
+          input.setAttribute("data-cus-captcha-input", "1");
+          return { filled: input.value.trim().length > 0 };
+        })(),
+        genericIframe: all('iframe[title*="captcha" i]').some((el) => {
+          const r = el.getBoundingClientRect();
+          return r.width >= 30 && r.height >= 30 && getComputedStyle(el).visibility !== "hidden" && !el.closest('[hidden], [aria-hidden="true"]');
+        }),
+        bodyText: isMain ? (document.body?.innerText ?? "") : "",
+        // "Solved" means EVERY response field of that kind holds a token. A page with a visible widget plus a
+        // passive score-only reCAPTCHA has two fields, and the passive one is filled from the start.
         tokens: {
-          recaptcha: hasValue("textarea[name='g-recaptcha-response'], #g-recaptcha-response"),
-          hcaptcha: hasValue("textarea[name='h-captcha-response']"),
-          turnstile: hasValue("input[name='cf-turnstile-response']"),
+          recaptcha: hasAll("textarea[name='g-recaptcha-response'], #g-recaptcha-response"),
+          hcaptcha: hasAll("textarea[name='h-captcha-response'], input[name='h-captcha-response']"),
+          turnstile: hasAll("input[name='cf-turnstile-response'], textarea[name='cf-turnstile-response']"),
         },
       };
-    })
+    }, isMain)
     .catch(() => null);
 
   if (!scan) return NOT_DETECTED;
+  const result = classifyScan(scan);
+  return result.detected ? { ...result, frame } : result;
+}
+
+function classifyScan(scan: RawScan): CaptchaDetection {
 
   if (scan.hardBlock) {
     return { ...NOT_DETECTED, detected: true, type: "UNKNOWN", hardBlock: true };
@@ -224,6 +313,9 @@ export async function detectCaptchaDetails(page: Page): Promise<CaptchaDetection
   }
   if (scan.turnstile) {
     return { ...NOT_DETECTED, detected: true, type: "TURNSTILE", siteKey: scan.turnstile.siteKey, iframeUrl: scan.turnstile.src, tokenPresent: scan.tokens.turnstile };
+  }
+  if (scan.imageCaptcha) {
+    return { ...NOT_DETECTED, detected: true, type: "IMAGE_TEXT", tokenPresent: scan.imageCaptcha.filled };
   }
   if (scan.genericIframe || /verify (that )?you.{0,15}(human|robot)|complete the captcha/i.test(scan.bodyText)) {
     return { ...NOT_DETECTED, detected: true, type: "UNKNOWN" };
@@ -286,6 +378,12 @@ export async function solveCaptcha(page: Page): Promise<CaptchaSolveResult> {
   // --- Cloudflare "Just a moment…" interstitial: needs its own parameters, see below ---
   if (detection.challengePage) {
     return solveCloudflareChallenge(page);
+  }
+
+  // --- "Type the characters in the picture" ---
+  if (detection.type === "IMAGE_TEXT") {
+    if (!env.captchaApiKey) return { solved: false, method: "none", message: "Image CAPTCHA found and CAPTCHA_API_KEY is not configured" };
+    return solveImageCaptcha(page, detection);
   }
 
   // --- Tier 1: 2Captcha ---
@@ -371,6 +469,45 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Reads the picture, has 2Captcha transcribe it, and types the answer into the box next to it. */
+async function solveImageCaptcha(page: Page, detection: CaptchaDetection): Promise<CaptchaSolveResult> {
+  const apiKey = env.captchaApiKey!;
+  if (Date.now() < accountErrorUntil) return { solved: false, method: "2captcha", message: `2Captcha unavailable: ${accountErrorMessage}` };
+  const frame = detection.frame ?? page.mainFrame();
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    try {
+      const image = frame.locator("[data-cus-captcha-img]").first();
+      const input = frame.locator("[data-cus-captcha-input]").first();
+      if ((await image.count()) === 0 || (await input.count()) === 0) return { solved: false, method: "2captcha", message: "Image CAPTCHA: the picture or its answer box disappeared" };
+
+      const png = await image.screenshot({ timeout: 8_000 });
+      const submit = await twoCaptchaApi("in.php", { key: apiKey, method: "base64", body: png.toString("base64"), regsense: "1", textinstructions: "Type the characters shown in the image exactly" }, "POST");
+      if (submit.status !== 1) return apiFailure(submit.request, " (image submit)");
+
+      const startedAt = Date.now();
+      await sleep(5_000); // text captchas are solved in seconds
+      while (Date.now() - startedAt < 90_000) {
+        const poll = await twoCaptchaApi("res.php", { key: apiKey, action: "get", id: submit.request }, "GET");
+        if (poll.status === 1) {
+          await input.fill(poll.request, { timeout: 5_000 });
+          tokenInjectedAt.set(page, Date.now());
+          return { solved: true, method: "2captcha", message: `Solved the image CAPTCHA via 2Captcha (typed "${poll.request}", task ${submit.request})` };
+        }
+        if (poll.request !== "CAPCHA_NOT_READY") {
+          const failure = apiFailure(poll.request, " (image)");
+          if (!failure.retryable || attempt === 2) return failure;
+          break;
+        }
+        await sleep(3_000);
+      }
+    } catch (err) {
+      if (attempt === 2) return { solved: false, method: "2captcha", message: `Image CAPTCHA error: ${err instanceof Error ? err.message : String(err)}` };
+    }
+  }
+  return { solved: false, method: "2captcha", message: "Image CAPTCHA could not be solved" };
+}
+
 async function solveWith2Captcha(page: Page, detection: CaptchaDetection): Promise<ApiOutcome> {
   const apiKey = env.captchaApiKey;
   if (!apiKey || !detection.siteKey) {
@@ -381,8 +518,11 @@ async function solveWith2Captcha(page: Page, detection: CaptchaDetection): Promi
   }
 
   try {
-    const userAgent = await page.evaluate(() => navigator.userAgent).catch(() => "");
-    const task: Record<string, string> = { key: apiKey, pageurl: page.url() };
+    const frame = detection.frame ?? page.mainFrame();
+    const userAgent = await frame.evaluate(() => navigator.userAgent).catch(() => "");
+    // reCAPTCHA/hCaptcha bind the token to the origin that renders the widget — for an iframed form
+    // that is the iframe's URL, not the top-level page's.
+    const task: Record<string, string> = { key: apiKey, pageurl: frame.url() || page.url() };
     if (userAgent) task.userAgent = userAgent;
 
     if (detection.type === "HCAPTCHA") {
@@ -390,6 +530,17 @@ async function solveWith2Captcha(page: Page, detection: CaptchaDetection): Promi
       if (detection.invisible) task.invisible = "1";
     } else if (detection.type === "TURNSTILE") {
       Object.assign(task, { method: "turnstile", sitekey: detection.siteKey });
+      // A Turnstile widget can be bound to an action / cData; the token is only valid if the solver echoes them.
+      const extras = await frame
+        .evaluate(() => {
+          const kept = (window as unknown as { __cusTurnstile?: { action?: string; cData?: string; chlPageData?: string } }).__cusTurnstile;
+          const el = document.querySelector(".cf-turnstile");
+          return { action: kept?.action ?? el?.getAttribute("data-action") ?? "", data: kept?.cData ?? el?.getAttribute("data-cdata") ?? "", pagedata: kept?.chlPageData ?? "" };
+        })
+        .catch(() => ({ action: "", data: "", pagedata: "" }));
+      if (extras.action) task.action = extras.action;
+      if (extras.data) task.data = extras.data;
+      if (extras.pagedata) task.pagedata = extras.pagedata;
     } else {
       Object.assign(task, { method: "userrecaptcha", googlekey: detection.siteKey });
       if (detection.invisible) task.invisible = "1";
@@ -407,7 +558,7 @@ async function solveWith2Captcha(page: Page, detection: CaptchaDetection): Promi
       const poll = await twoCaptchaApi("res.php", { key: apiKey, action: "get", id: taskId }, "GET");
       if (poll.status === 1) {
         const token = poll.request;
-        if (!(await injectCaptchaToken(page, detection, token))) {
+        if (!(await injectCaptchaToken(detection.frame ?? page.mainFrame(), detection, token))) {
           return { solved: false, method: "2captcha", message: `2Captcha returned a token (task ${taskId}) but the page has no ${detection.type} response field to put it in` };
         }
         tokenInjectedAt.set(page, Date.now());
@@ -545,18 +696,19 @@ async function solveCloudflareChallenge(page: Page): Promise<CaptchaSolveResult>
  * page has no response field to receive the token. It deliberately does NOT click any
  * submit button — the apply flow does that once the form is actually filled in.
  */
-async function injectCaptchaToken(page: Page, detection: CaptchaDetection, token: string): Promise<boolean> {
-  return page.evaluate(
+async function injectCaptchaToken(ctx: Page | Frame, detection: CaptchaDetection, token: string): Promise<boolean> {
+  return ctx.evaluate(
     ({ type, token }) => {
       // tsx/esbuild wraps named inner functions in a __name() helper that doesn't exist in the browser.
       (globalThis as unknown as { __name?: (f: unknown) => unknown }).__name ??= (f) => f;
       const fieldSelector =
         type === "HCAPTCHA"
-          ? "textarea[name='h-captcha-response'], textarea[name='g-recaptcha-response']"
+          ? "textarea[name='h-captcha-response'], input[name='h-captcha-response'], textarea[name='g-recaptcha-response']"
           : type === "TURNSTILE"
-            ? "input[name='cf-turnstile-response']"
+            ? "input[name='cf-turnstile-response'], textarea[name='cf-turnstile-response']"
             : "textarea[name='g-recaptcha-response'], #g-recaptcha-response";
-      const widgetSelector = type === "HCAPTCHA" ? ".h-captcha" : type === "TURNSTILE" ? ".cf-turnstile" : ".g-recaptcha";
+      // hCaptcha's compatibility mode puts the widget (and its data-callback) on a "g-recaptcha" element.
+      const widgetSelector = type === "HCAPTCHA" ? ".h-captcha, .g-recaptcha, [data-sitekey]" : type === "TURNSTILE" ? ".cf-turnstile, [data-sitekey]" : ".g-recaptcha, [data-sitekey]";
 
       const fields = Array.from(document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>(fieldSelector));
       for (const field of fields) {
@@ -575,6 +727,12 @@ async function injectCaptchaToken(page: Page, detection: CaptchaDetection, token
         const fn = name.split(".").reduce<unknown>((obj, key) => (obj as Record<string, unknown> | undefined)?.[key], win);
         if (typeof fn === "function") callbacks.add(fn as (t: string) => void);
       });
+
+      // 1b) A Turnstile widget rendered from script hands its callback to turnstile.render(); our render hook kept it.
+      if (type === "TURNSTILE") {
+        const kept = (win["__cusTurnstile"] as { callback?: unknown } | undefined)?.callback;
+        if (typeof kept === "function") callbacks.add(kept as (t: string) => void);
+      }
 
       // 2) reCAPTCHA stores programmatic callbacks several levels deep in ___grecaptcha_cfg
       if (type === "RECAPTCHA_V2") {
@@ -666,8 +824,6 @@ Analyze the screenshot and respond with ONLY a JSON object:
 }
 
 Focus on identifying if this is a simple checkbox CAPTCHA that can be solved with a single click, and if so, provide the exact pixel coordinates of the checkbox center.`;
-
-    const VISION_MODELS = ["inclusionai/ling-3.0-flash-vl:free", "qwen/qwen3.8-27b:free", "google/gemma-4-26b-a4b-it:free", "google/gemma-4-31b-it:free"];
 
     for (const modelId of VISION_MODELS) {
       try {

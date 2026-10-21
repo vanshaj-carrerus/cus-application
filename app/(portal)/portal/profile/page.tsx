@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
+import { ApplicationDetailsCard } from "@/components/shared/application-details-card";
+import { SavedAnswersPanel } from "@/components/shared/saved-answers-panel";
 
 interface CandidateProfile {
   name: string;
@@ -147,6 +149,10 @@ export default function PortalProfilePage() {
           </div>
         </CardContent>
       </Card>
+
+      <ApplicationDetailsCard endpoint="/api/portal/me" audience="candidate" />
+
+      <SavedAnswersPanel baseUrl="/api/portal/answers" audience="candidate" />
     </div>
   );
 }

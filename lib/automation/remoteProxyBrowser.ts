@@ -11,6 +11,15 @@ function buildProxyEndpoint(): string {
   return `wss://${PROXY_USER}:${password}@${PROXY_HOST}`;
 }
 
+/**
+ * Attaches to the remote residential browser without opening a page. Used by the apply flow
+ * (APPLY_REMOTE_BROWSER=true) so sites that block datacenter/headless traffic — Cloudflare
+ * "Just a moment…" / "you have been blocked" pages — see a normal residential visitor.
+ */
+export async function connectRemoteBrowser(): Promise<Browser> {
+  return chromium.connectOverCDP(buildProxyEndpoint(), { timeout: 60_000 });
+}
+
 export interface ProxySession {
   browser: Browser;
   context: BrowserContext;

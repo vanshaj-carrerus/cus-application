@@ -14,6 +14,7 @@ export const QUEUE_NAMES = {
   resumeTailor: "resume-tailor",
   playwrightApply: "playwright-apply",
   emailSync: "email-sync",
+  confirmationCheck: "confirmation-check",
 } as const;
 
 type QueueName = (typeof QUEUE_NAMES)[keyof typeof QUEUE_NAMES];
@@ -51,3 +52,8 @@ export const jobIngestionQueue = () => getQueue(QUEUE_NAMES.jobIngestion);
 export const resumeTailorQueue = () => getQueue(QUEUE_NAMES.resumeTailor);
 export const playwrightApplyQueue = () => getQueue(QUEUE_NAMES.playwrightApply);
 export const emailSyncQueue = () => getQueue(QUEUE_NAMES.emailSync);
+
+// After a submitted application: look for the employer's confirmation email, a few times over the next hour.
+export const confirmationCheckQueue = () => getQueue(QUEUE_NAMES.confirmationCheck);
+/** First look after 3 minutes, then every 12 minutes, 4 looks in all (~39 minutes). */
+export const CONFIRMATION_CHECK_OPTIONS = { delay: 3 * 60_000, attempts: 4, backoff: { type: "fixed" as const, delay: 12 * 60_000 } };

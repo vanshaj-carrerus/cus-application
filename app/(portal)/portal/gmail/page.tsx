@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
+import { MailViewer } from "@/components/portal/mail-viewer";
 
 interface GmailStatus {
   connected: boolean;
@@ -15,48 +16,18 @@ interface GmailStatus {
   connectedAt?: string;
 }
 
-interface RecentMessage {
-  id: string;
-  from: string;
-  subject: string;
-  snippet: string;
-  sentAt: string;
-}
-
 function PortalGmailContent() {
   const searchParams = useSearchParams();
   const [data, setData] = useState<GmailStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [disconnecting, setDisconnecting] = useState(false);
-  const [recent, setRecent] = useState<RecentMessage[] | null>(null);
-  const [recentLoading, setRecentLoading] = useState(false);
-  const [recentError, setRecentError] = useState<string | null>(null);
 
   const load = () => {
     setLoading(true);
     fetch("/api/portal/gmail")
       .then((r) => r.json())
-      .then((d) => {
-        setData(d);
-        if (d?.connected) loadRecent();
-      })
+      .then((d) => setData(d))
       .finally(() => setLoading(false));
-  };
-
-  const loadRecent = () => {
-    setRecentLoading(true);
-    setRecentError(null);
-    fetch("/api/portal/gmail/recent")
-      .then((r) => r.json())
-      .then((d) => {
-        if (d.error) {
-          setRecentError(d.error);
-          return;
-        }
-        setRecent(d.messages ?? []);
-      })
-      .catch(() => setRecentError("Failed to load recent emails"))
-      .finally(() => setRecentLoading(false));
   };
 
   useEffect(() => {
@@ -67,7 +38,6 @@ function PortalGmailContent() {
     setDisconnecting(true);
     try {
       await fetch("/api/portal/gmail", { method: "DELETE" });
-      setRecent(null);
       load();
     } finally {
       setDisconnecting(false);
@@ -78,13 +48,13 @@ function PortalGmailContent() {
   const connectError = searchParams.get("gmail_error");
 
   return (
-    <div className="mx-auto flex max-w-2xl flex-col gap-4">
-      <div>
+    <div className="mx-auto flex max-w-6xl flex-col gap-4">
+      <div className="max-w-2xl">
         <h1 className="text-xl font-semibold text-slate-900">Email Access</h1>
         <p className="text-sm text-slate-500">
           Some applications ask you to verify your email during sign-up with a one-time code. Connecting your Gmail lets the
-          auto-apply worker read that code and complete the application without waiting on you. We only ever read
-          verification-related messages — we never see or store anything else in your inbox.
+          auto-apply worker look for that code and complete the application without waiting on you — it only searches for
+          recent verification messages. Below you can browse your own mailbox (read-only); nothing from it is stored by us.
         </p>
       </div>
 
@@ -99,7 +69,7 @@ function PortalGmailContent() {
         </Card>
       )}
 
-      <Card>
+      <Card className="max-w-2xl">
         <CardHeader>
           <CardTitle>Gmail Connection</CardTitle>
         </CardHeader>
@@ -130,35 +100,7 @@ function PortalGmailContent() {
         </CardContent>
       </Card>
 
-      {data?.connected && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Latest 5 Emails</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {recentLoading ? (
-              <Skeleton className="h-32 w-full" />
-            ) : recentError ? (
-              <p className="text-sm text-red-600">{recentError}</p>
-            ) : !recent || recent.length === 0 ? (
-              <p className="text-sm text-slate-500">No inbox messages found.</p>
-            ) : (
-              <div className="flex flex-col gap-2">
-                {recent.map((m) => (
-                  <div key={m.id} className="rounded-md border border-slate-200 p-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="truncate text-sm font-medium text-slate-900">{m.subject}</div>
-                      <div className="whitespace-nowrap text-xs text-slate-400">{new Date(m.sentAt).toLocaleString()}</div>
-                    </div>
-                    <div className="text-xs text-slate-500">{m.from}</div>
-                    <div className="mt-1 truncate text-xs text-slate-400">{m.snippet}</div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
+      {data?.connected && <MailViewer />}
     </div>
   );
 }
