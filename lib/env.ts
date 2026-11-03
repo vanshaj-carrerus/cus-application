@@ -28,9 +28,6 @@ export const env = {
   get aiModel() {
     return process.env.AI_MODEL || "gemini-flash-lite-latest";
   },
-  get redisUrl() {
-    return process.env.REDIS_URL || "redis://localhost:6379";
-  },
   get authSecret() {
     return required("AUTH_SECRET");
   },
@@ -54,23 +51,5 @@ export const env = {
   },
   get openrouterApiKey() {
     return process.env.OPENROUTER_API_KEY;
-  },
-  get captchaApiKey() {
-    return process.env.CAPTCHA_API_KEY;
-  },
-  get googleClientId() {
-    return required("GOOGLE_CLIENT_ID");
-  },
-  get googleClientSecret() {
-    return required("GOOGLE_CLIENT_SECRET");
-  },
-  get googleRedirectUri() {
-    return required("GOOGLE_REDIRECT_URI");
-  },
-  get gmailPubsubTopic() {
-    return required("GMAIL_PUBSUB_TOPIC");
-  },
-  get gmailPubsubVerificationToken() {
-    return required("GMAIL_PUBSUB_VERIFICATION_TOKEN");
   },
 };

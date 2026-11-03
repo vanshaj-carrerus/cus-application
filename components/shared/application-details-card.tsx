@@ -133,10 +133,10 @@ export function ApplicationDetailsCard({ endpoint, audience }: { endpoint: strin
       <CardHeader>
         <CardTitle>Application details</CardTitle>
         <p className="text-xs text-slate-500">
-          {audience === "staff" ? "What the auto-apply bot may state on application forms for this candidate." : "These are the facts employers' application forms ask for. We only state what is filled in here."} A blank
-          field means the bot stops and asks instead of guessing.
+          {audience === "staff" ? "What the application assistant fills into forms for this candidate." : "These are the facts employers' application forms ask for. We only state what is filled in here."} A blank
+          field is left empty for the person applying to answer, never guessed.
         </p>
-        {missing.length > 0 && <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">Still needed for auto-apply to work well: {missing.join(", ")}.</p>}
+        {missing.length > 0 && <p className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-800">Still needed so forms can be filled automatically: {missing.join(", ")}.</p>}
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
         <div>

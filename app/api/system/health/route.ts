@@ -3,7 +3,6 @@ import { withAuth } from "@/lib/api/handler";
 import { connectDB } from "@/lib/db/mongodb";
 import { SyncLog } from "@/lib/models/SyncLog";
 import { AiAnalysis } from "@/lib/models/AiAnalysis";
-import { getRedisConnection } from "@/lib/queue/connection";
 import mongoose from "mongoose";
 
 export const GET = withAuth(async () => {
@@ -14,14 +13,6 @@ export const GET = withAuth(async () => {
     health.database = { status: mongoose.connection.readyState === 1 ? "UP" : "DOWN" };
   } catch (err) {
     health.database = { status: "DOWN", error: err instanceof Error ? err.message : String(err) };
-  }
-
-  try {
-    const redis = getRedisConnection();
-    await redis.ping();
-    health.redis = { status: "UP" };
-  } catch (err) {
-    health.redis = { status: "DOWN", error: err instanceof Error ? err.message : String(err) };
   }
 
   const lastSync = await SyncLog.findOne({}).sort({ startedAt: -1 });

@@ -7,9 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "workers": "tsx workers/start.ts",
     "seed": "tsx scripts/seed.ts",
-    "board-login": "tsx scripts/board-login.ts"
+    "build:extension": "node scripts/build-extension.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1150.0",
@@ -28,13 +27,10 @@
     "@radix-ui/react-tabs": "^1.1.21",
     "@radix-ui/react-toast": "^1.2.23",
     "bcryptjs": "^3.0.3",
-    "bullmq": "^6.3.4",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.4.0",
     "dotenv": "^17.4.2",
-    "googleapis": "^178.1.1",
-    "ioredis": "^6.0.0",
     "jose": "^6.2.12",
     "lucide-react": "^1.42.0",
     "mammoth": "^1.12.2",
@@ -51,10 +47,12 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@types/bcryptjs": "^2.4.6",
+    "@types/chrome": "^0.3.7",
     "@types/node": "^20",
     "@types/pdf-parse": "^1.1.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "esbuild": "^0.28.2",
     "eslint": "^9",
     "eslint-config-next": "16.3.4",
     "tailwindcss": "^4",

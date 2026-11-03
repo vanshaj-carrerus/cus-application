@@ -149,6 +149,16 @@ export function pickBestApplyLink(raw: RawJSearchJob): string | undefined {
   return candidates.map((c, i) => ({ ...c, i, score: score(c) })).sort((x, y) => y.score - x.score || x.i - y.i)[0]?.link;
 }
 
+/** Re-reads a listing from the API and returns its best apply link, or undefined when the API can't be reached. */
+export async function findDirectApplyLink(externalJobId: string): Promise<string | undefined> {
+  try {
+    const raw = await fetchJob(externalJobId);
+    return raw ? pickBestApplyLink(raw) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function normalizeJob(raw: RawJSearchJob): Partial<IJob> {
   return {
     externalJobId: raw.job_id,

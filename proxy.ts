@@ -3,12 +3,18 @@ import type { NextRequest } from "next/server";
 import { verifySession } from "@/lib/auth/session";
 
 const PUBLIC_PATHS = ["/login", "/api/auth/login"];
+// The desktop helper has no login cookie; these routes check its own Bearer token (see lib/api/helperAuth.ts).
+const HELPER_TOKEN_PREFIX = "/api/helper/applications/";
 const AUTH_COOKIE_NAME = process.env.AUTH_COOKIE_NAME || "recruitai_session";
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   if (PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + "/"))) {
+    return NextResponse.next();
+  }
+
+  if (pathname.startsWith(HELPER_TOKEN_PREFIX)) {
     return NextResponse.next();
   }
 

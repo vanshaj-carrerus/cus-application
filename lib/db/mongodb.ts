@@ -4,7 +4,7 @@ import { env } from "@/lib/env";
 // Without this, whether a .populate("someRef") call works depends on whether some
 // unrelated code path happened to import that specific model file first in this
 // process — a MissingSchemaError trap that's easy to hit intermittently across
-// routes/workers. Importing the whole barrel here once makes registration order
+// routes. Importing the whole barrel here once makes registration order
 // a non-issue everywhere connectDB() is called.
 import "@/lib/models";
 
@@ -26,7 +26,11 @@ export async function connectDB(): Promise<typeof mongoose> {
   if (!cache.promise) {
     cache.promise = mongoose.connect(env.mongodbUri, {
       bufferCommands: false,
-      maxPoolSize: 10,
+      // Every request, streamed search and extension call shares this pool; 10 starves under a crowd.
+      maxPoolSize: Number(process.env.MONGODB_POOL_SIZE) || 50,
+      minPoolSize: 5,
+      maxIdleTimeMS: 60_000,
+      serverSelectionTimeoutMS: 15_000,
     });
   }
 

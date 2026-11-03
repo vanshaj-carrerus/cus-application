@@ -22,6 +22,9 @@ export interface IApplication extends Document {
   notes: { text: string; authorId: Types.ObjectId; createdAt: Date }[];
   timeline: IApplicationTimelineEntry[];
   automationStatus: AutomationStatus;
+  /** Set when a marketer clicks Apply: their desktop helper claims the application from here. */
+  assist?: { requestedBy?: Types.ObjectId; requestedAt?: Date; claimedAt?: Date };
+  appliedBy?: Types.ObjectId;
   confirmationData?: Record<string, unknown>;
   applicationProofScreenshot?: string;
   failureReason?: string;
@@ -51,6 +54,12 @@ const ApplicationSchema = new Schema<IApplication>(
       },
     ],
     automationStatus: { type: String, enum: AUTOMATION_STATUSES, default: "NOT_QUEUED" },
+    assist: {
+      requestedBy: { type: Schema.Types.ObjectId, ref: "User" },
+      requestedAt: Date,
+      claimedAt: Date,
+    },
+    appliedBy: { type: Schema.Types.ObjectId, ref: "User" },
     confirmationData: { type: Schema.Types.Mixed },
     applicationProofScreenshot: String,
     failureReason: String,
@@ -60,6 +69,10 @@ const ApplicationSchema = new Schema<IApplication>(
 
 ApplicationSchema.index({ candidateId: 1, jobId: 1 }, { unique: true });
 ApplicationSchema.index({ status: 1 });
+ApplicationSchema.index({ automationStatus: 1, "assist.requestedBy": 1, "assist.requestedAt": 1 });
+ApplicationSchema.index({ candidateId: 1, automationStatus: 1, updatedAt: -1 });
+ApplicationSchema.index({ automationStatus: 1, updatedAt: -1 });
+ApplicationSchema.index({ appliedBy: 1, appliedAt: -1 });
 ApplicationSchema.index({ recruiterId: 1, status: 1 });
 ApplicationSchema.index({ jobId: 1, status: 1 });
 

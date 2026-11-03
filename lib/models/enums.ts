@@ -58,6 +58,8 @@ export const AUTOMATION_STATUSES = [
   "QUEUED",
   "IN_PROGRESS",
   "AWAITING_REVIEW",
+  "READY_TO_APPLY", // resume + cover letter are ready; waiting for a marketer to click Apply
+  "APPLY_REQUESTED", // a marketer clicked Apply; waiting for their assistant browser to pick it up
   "SUBMITTED",
   "FAILED",
 ] as const;
@@ -149,12 +151,6 @@ export const ATTEMPT_STATUSES = [
 ] as const;
 export type AttemptStatus = (typeof ATTEMPT_STATUSES)[number];
 
-export const GMAIL_ACCOUNT_STATUSES = ["CONNECTED", "DISCONNECTED", "ERROR", "NEEDS_REAUTH"] as const;
-export type GmailAccountStatus = (typeof GMAIL_ACCOUNT_STATUSES)[number];
-
-export const EMAIL_THREAD_STATUSES = ["OPEN", "NEEDS_RESPONSE", "CLOSED"] as const;
-export type EmailThreadStatus = (typeof EMAIL_THREAD_STATUSES)[number];
-
 export const OWNER_TYPES = ["USER", "CANDIDATE"] as const;
 export type OwnerType = (typeof OWNER_TYPES)[number];
 
@@ -179,7 +175,7 @@ export const PERMISSIONS = {
   "clients:read": ["SUPER_ADMIN", "ADMIN", "RECRUITER", "HIRING_MANAGER"],
   "clients:write": ["SUPER_ADMIN", "ADMIN"],
   "autoapply:manage": ["SUPER_ADMIN", "ADMIN", "RECRUITER"],
-  "gmail:connect": ["SUPER_ADMIN", "ADMIN", "RECRUITER"],
-  "gmail:send": ["SUPER_ADMIN", "ADMIN", "RECRUITER"],
+  // Find jobs, prepare, apply (through the browser extension) and record applications. Candidates may do this for themselves only.
+  "assist:use": ["SUPER_ADMIN", "ADMIN", "RECRUITER", "CANDIDATE"],
 } as const;
 export type Permission = keyof typeof PERMISSIONS;

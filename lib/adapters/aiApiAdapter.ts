@@ -1,4 +1,5 @@
 import { env } from "@/lib/env";
+import { aiLimiter } from "@/lib/concurrency/limiter";
 
 /**
  * Adapter around the Google Gemini (Generative Language API) generateContent endpoint.
@@ -41,7 +42,10 @@ interface GeminiResponse {
 
 const RETRYABLE_STATUSES = new Set([429, 500, 503]);
 
-async function callGemini(model: string, body: Record<string, unknown>, attempt = 0): Promise<GeminiResponse> {
+// At most AI_CONCURRENCY requests are in flight at once; the rest wait their turn. Retries stay inside their slot.
+const callGemini = (model: string, body: Record<string, unknown>): Promise<GeminiResponse> => aiLimiter().run(() => callGeminiOnce(model, body));
+
+async function callGeminiOnce(model: string, body: Record<string, unknown>, attempt = 0): Promise<GeminiResponse> {
   const url = `${env.aiApiUrl}/models/${model}:generateContent?key=${env.aiApiKey}`;
   const res = await fetch(url, {
     method: "POST",
@@ -52,7 +56,7 @@ async function callGemini(model: string, body: Record<string, unknown>, attempt 
   if (!res.ok) {
     if (RETRYABLE_STATUSES.has(res.status) && attempt < 2) {
       await new Promise((resolve) => setTimeout(resolve, 1000 * 2 ** attempt));
-      return callGemini(model, body, attempt + 1);
+      return callGeminiOnce(model, body, attempt + 1);
     }
     const errBody = await res.text().catch(() => "");
     throw new AiApiError(`AI API request failed: ${res.status}`, res.status, errBody);

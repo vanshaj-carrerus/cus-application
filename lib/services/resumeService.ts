@@ -1,6 +1,6 @@
 import { connectDB } from "@/lib/db/mongodb";
 import { Resume } from "@/lib/models/Resume";
-import { Candidate } from "@/lib/models/Candidate";
+import { Candidate, type ICandidate } from "@/lib/models/Candidate";
 import { Job } from "@/lib/models/Job";
 import { AiApiAdapter } from "@/lib/adapters/aiApiAdapter";
 import { logAiAction } from "@/lib/ai/log-action";
@@ -67,12 +67,57 @@ Produce:
   return result;
 }
 
+/**
+ * Plain-text resume source built from the structured profile, for candidates with no uploaded resume.
+ * Returns "" when the profile has no experience, education or skills (nothing real to write from).
+ */
+export function buildResumeTextFromProfile(candidate: ICandidate): string {
+  const lines: string[] = [];
+  const section = (title: string, body: string[]) => {
+    if (body.length) lines.push("", title.toUpperCase(), ...body);
+  };
+  const range = (start?: string, end?: string, current?: boolean) => [start, current ? "Present" : end].filter(Boolean).join(" - ");
+
+  const experience = (candidate.experience ?? []).filter((e) => e.title || e.company);
+  const education = (candidate.education ?? []).filter((e) => e.institution);
+  const skills = [...new Set([...(candidate.skills ?? []), ...(candidate.technicalSkills ?? []), ...(candidate.softSkills ?? [])])];
+  if (experience.length === 0 && education.length === 0 && skills.length === 0) return "";
+
+  lines.push(candidate.name);
+  if (candidate.aiProfile?.headline) lines.push(candidate.aiProfile.headline);
+  const facts = [candidate.yearsOfExperience != null ? `${candidate.yearsOfExperience} years of experience` : "", candidate.careerLevel, candidate.location].filter(Boolean);
+  if (facts.length) lines.push(facts.join(" | "));
+
+  section("Summary", candidate.aiProfile?.overview ? [candidate.aiProfile.overview] : []);
+  section("Skills", skills.length ? [skills.join(", ")] : []);
+  section(
+    "Experience",
+    experience.flatMap((e) => {
+      const when = range(e.startDate, e.endDate, e.isCurrent);
+      return [`${[e.title, e.company].filter(Boolean).join(", ")}${when ? ` (${when})` : ""}`, ...(e.description ? [e.description] : []), ""];
+    })
+  );
+  section(
+    "Education",
+    education.map((e) => {
+      const when = range(e.startDate, e.endDate);
+      return `${[e.degree, e.field].filter(Boolean).join(" in ")}${e.degree || e.field ? ", " : ""}${e.institution}${when ? ` (${when})` : ""}`;
+    })
+  );
+  section("Projects", (candidate.projects ?? []).filter((p) => p.name).map((p) => `${p.name}${p.description ? `: ${p.description}` : ""}`));
+  section("Certifications", candidate.certifications ?? []);
+  return lines.join("\n").trim();
+}
+
 export async function tailorResume(candidateId: string, jobId: string, opts: { userId?: string } = {}) {
   await connectDB();
   const [candidate, job] = await Promise.all([Candidate.findById(candidateId), Job.findById(jobId)]);
   if (!candidate) throw new Error("Candidate not found");
   if (!job) throw new Error("Job not found");
-  if (!candidate.resumeText) throw new Error("Candidate has no base resume text to tailor");
+  // No uploaded resume: write from what the profile holds (experience, education, skills...). The same
+  // "never invent anything" rule applies, so a thin profile gives a short resume, not a padded one.
+  const sourceText = candidate.resumeText?.trim() || buildResumeTextFromProfile(candidate);
+  if (!sourceText) throw new Error("This candidate has no resume uploaded and no profile details (experience, education or skills) to build one from. Add some under Edit Details.");
 
   const lastVersion = await Resume.findOne({ candidateId }).sort({ version: -1 });
   const nextVersion = (lastVersion?.version ?? 0) + 1;
@@ -81,8 +126,8 @@ export async function tailorResume(candidateId: string, jobId: string, opts: { u
 
 Write as the candidate speaking about themselves in first person (e.g. "I led...", "I managed..."). Never refer to the candidate by name or in third person (e.g. never write "${candidate.name} is..." or "${candidate.name} has..."). A resume is something the candidate writes about themselves, not something written about them.
 
-SOURCE RESUME (ground truth — do not add facts beyond this):
-${candidate.resumeText.slice(0, 8000)}
+SOURCE RESUME${candidate.resumeText?.trim() ? "" : " (assembled from the candidate's profile, since no resume file was uploaded)"} (ground truth — do not add facts beyond this):
+${sourceText.slice(0, 8000)}
 
 TARGET JOB:
 Title: ${job.title}
@@ -103,7 +148,7 @@ Return only the tailored resume text, well formatted in plain text with clear se
     jobId,
     version: nextVersion,
     label: `v${nextVersion} — ${job.title} @ ${job.company}`,
-    extractedText: candidate.resumeText,
+    extractedText: sourceText,
     tailoredContent,
     isTailored: true,
     fileType: "GENERATED",

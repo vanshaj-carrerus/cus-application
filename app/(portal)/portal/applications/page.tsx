@@ -31,6 +31,22 @@ const STATUS_VARIANT: Record<string, "default" | "secondary" | "outline" | "succ
   WITHDRAWN: "danger",
 };
 
+/** Plain-language progress for the candidate, from where the application is in our team's apply process. */
+function progressLabel(a: ApplicationRow): string | null {
+  if (a.status !== "TAILORED" && a.status !== "PENDING_MATCHING") return null;
+  switch (a.automationStatus) {
+    case "QUEUED":
+      return "We found this job and are preparing your resume and cover letter";
+    case "READY_TO_APPLY":
+      return "Your resume and cover letter are ready. Our team will apply shortly";
+    case "APPLY_REQUESTED":
+    case "IN_PROGRESS":
+      return "Our team is submitting your application now";
+    default:
+      return null;
+  }
+}
+
 export default function PortalApplicationsPage() {
   const [applications, setApplications] = useState<ApplicationRow[]>([]);
   const [loading, setLoading] = useState(true);
@@ -63,6 +79,7 @@ export default function PortalApplicationsPage() {
                       {a.jobId?.title} {a.jobId?.company && `@ ${a.jobId.company}`}
                     </div>
                     {a.jobId?.location && <div className="text-xs text-slate-500">{a.jobId.location}</div>}
+                    {progressLabel(a) && <div className="text-xs text-blue-700">{progressLabel(a)}</div>}
                   </div>
                   <Badge variant={STATUS_VARIANT[a.status] ?? "secondary"}>{a.status.replace(/_/g, " ")}</Badge>
                 </CardContent>

@@ -13,7 +13,7 @@ import { getR2Client, getR2KeyFromPublicUrl, getR2PublicUrl, isR2Configured } fr
  *  - Local disk (default): private directory outside the Next.js static root, served only
  *    through the authenticated /api/files/[...path] route. Still used for audit-proof
  *    screenshots.
- */
+*/
 
 const STORAGE_ROOT = path.join(process.cwd(), "storage", "generated");
 
