@@ -7,18 +7,37 @@ import { Skeleton } from "@/components/ui/skeleton";
 
 interface Health {
   database?: { status: string; error?: string };
-  redis?: { status: string; error?: string };
   jobApi?: { lastSync: { status: string; at: string; fetched: number } | null };
   aiApi?: { status: string; failedRequests: number; totalRequests: number };
 }
 
+interface MemberStats {
+  userId: string;
+  name: string;
+  today: number;
+  week: number;
+  month: number;
+  total: number;
+}
+
 export default function AdminPage() {
   const [health, setHealth] = useState<Health | null>(null);
+  const [members, setMembers] = useState<MemberStats[] | null>(null);
+  const [queue, setQueue] = useState<{ ready: number; inBrowser: number; needsPreparing: number } | null>(null);
+  const [topCandidates, setTopCandidates] = useState<Array<{ candidateId: string; name: string; week: number; total: number }>>([]);
 
   useEffect(() => {
     fetch("/api/system/health")
       .then((r) => r.json())
       .then(setHealth);
+    fetch("/api/analytics/marketing")
+      .then((r) => r.json())
+      .then((d) => {
+        setMembers(d.members ?? []);
+        setQueue(d.queue ?? null);
+        setTopCandidates(d.topCandidates ?? []);
+      })
+      .catch(() => setMembers([]));
   }, []);
 
   return (
@@ -28,9 +47,8 @@ export default function AdminPage() {
       {!health ? (
         <Skeleton className="h-48 w-full" />
       ) : (
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
           <StatusCard label="Database" status={health.database?.status} />
-          <StatusCard label="Redis / Queues" status={health.redis?.status} />
           <StatusCard label="Job API" status={health.jobApi?.lastSync?.status ?? "NO SYNC YET"} />
           <StatusCard label="AI API" status={health.aiApi?.status} />
         </div>
@@ -66,6 +84,82 @@ export default function AdminPage() {
         </Card>
       )}
 
+      {queue && (
+        <div className="grid grid-cols-3 gap-3">
+          <StatusTile label="Ready to apply" value={queue.ready} />
+          <StatusTile label="Open in a browser" value={queue.inBrowser} />
+          <StatusTile label="Needs preparing" value={queue.needsPreparing} />
+        </div>
+      )}
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Applications submitted per team member</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {members === null ? (
+            <Skeleton className="h-16 w-full" />
+          ) : members.length === 0 ? (
+            <p className="text-sm text-slate-500">No applications have been submitted through the apply queue yet.</p>
+          ) : (
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-slate-500">
+                  <th className="py-1 font-medium">Team member</th>
+                  <th className="py-1 text-right font-medium">Today</th>
+                  <th className="py-1 text-right font-medium">Last 7 days</th>
+                  <th className="py-1 text-right font-medium">Last 30 days</th>
+                  <th className="py-1 text-right font-medium">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {members.map((m) => (
+                  <tr key={m.userId} className="border-t border-slate-100">
+                    <td className="py-1.5">{m.name}</td>
+                    <td className="py-1.5 text-right">{m.today}</td>
+                    <td className="py-1.5 text-right">{m.week}</td>
+                    <td className="py-1.5 text-right">{m.month}</td>
+                    <td className="py-1.5 text-right font-medium">{m.total}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </CardContent>
+      </Card>
+
+      {topCandidates.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Candidates with the most applications</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-left text-xs text-slate-500">
+                  <th className="py-1 font-medium">Candidate</th>
+                  <th className="py-1 text-right font-medium">Last 7 days</th>
+                  <th className="py-1 text-right font-medium">Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {topCandidates.map((c) => (
+                  <tr key={c.candidateId} className="border-t border-slate-100">
+                    <td className="py-1.5">
+                      <a href={`/candidates/${c.candidateId}`} className="hover:underline">
+                        {c.name}
+                      </a>
+                    </td>
+                    <td className="py-1.5 text-right">{c.week}</td>
+                    <td className="py-1.5 text-right font-medium">{c.total}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </CardContent>
+        </Card>
+      )}
+
       <Card>
         <CardHeader>
           <CardTitle>User Management</CardTitle>
@@ -76,6 +170,17 @@ export default function AdminPage() {
         </CardContent>
       </Card>
     </div>
+  );
+}
+
+function StatusTile({ label, value }: { label: string; value: number }) {
+  return (
+    <Card>
+      <CardContent className="p-4">
+        <div className="text-xl font-semibold text-slate-900">{value}</div>
+        <div className="text-xs text-slate-500">{label}</div>
+      </CardContent>
+    </Card>
   );
 }
 

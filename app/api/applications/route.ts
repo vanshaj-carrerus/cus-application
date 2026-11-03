@@ -12,6 +12,11 @@ export const GET = withAuth(async (req: NextRequest, { user }) => {
     if (value) filter[key] = value;
   }
 
+  // ?automationStatus=READY_TO_APPLY,IN_PROGRESS  (comma-separated)
+  const automationStatus = searchParams.get("automationStatus");
+  if (automationStatus) filter.automationStatus = { $in: automationStatus.split(",") };
+  const limit = Math.min(Number(searchParams.get("limit")) || 100, 300);
+
   // A candidate can only ever see their own applications — never trust a client-
   // supplied candidateId for this role, or one candidate could view another's data.
   if (user.role === "CANDIDATE") {
@@ -20,10 +25,13 @@ export const GET = withAuth(async (req: NextRequest, { user }) => {
   }
 
   const applications = await Application.find(filter)
+    .select("-timeline -notes -confirmationData")
     .populate("candidateId", "name email")
-    .populate("jobId", "title company")
+    .populate("jobId", "title company location applicationUrl")
+    .populate("resumeVersionId", "fileUrl")
     .sort({ updatedAt: -1 })
-    .limit(100);
+    .limit(limit)
+    .lean();
   return NextResponse.json({ applications });
 }, "applications:read");
 

@@ -1,4 +1,5 @@
 import { env } from "@/lib/env";
+import { isAtsUrl, isBoardOrAggregatorUrl } from "@/lib/automation/hostPolicy";
 import type { IJob } from "@/lib/models/Job";
 
 /**
@@ -28,6 +29,8 @@ export interface RawJSearchJob {
   job_title: string;
   job_description: string;
   job_apply_link?: string | null;
+  job_apply_is_direct?: boolean;
+  apply_options?: Array<{ publisher?: string | null; apply_link?: string | null; is_direct?: boolean }> | null;
   job_city?: string | null;
   job_state?: string | null;
   job_country?: string | null;
@@ -131,12 +134,37 @@ function inferEmploymentType(raw?: string | null): IJob["employmentType"] {
   }
 }
 
+/** Best link to apply through: direct/ATS links beat job-board links; ties keep the API's own order. */
+export function pickBestApplyLink(raw: RawJSearchJob): string | undefined {
+  const candidates = [
+    ...(raw.job_apply_link ? [{ link: raw.job_apply_link, direct: raw.job_apply_is_direct === true }] : []),
+    ...(raw.apply_options ?? []).filter((o) => o.apply_link).map((o) => ({ link: o.apply_link as string, direct: o.is_direct === true })),
+  ];
+  // Known ATS beats an unknown employer site beats a job board / aggregator (see hostPolicy.ts for the lists).
+  const score = ({ link, direct }: { link: string; direct: boolean }) => {
+    if (isAtsUrl(link)) return 3;
+    if (isBoardOrAggregatorUrl(link)) return 0;
+    return direct ? 2 : 1;
+  };
+  return candidates.map((c, i) => ({ ...c, i, score: score(c) })).sort((x, y) => y.score - x.score || x.i - y.i)[0]?.link;
+}
+
+/** Re-reads a listing from the API and returns its best apply link, or undefined when the API can't be reached. */
+export async function findDirectApplyLink(externalJobId: string): Promise<string | undefined> {
+  try {
+    const raw = await fetchJob(externalJobId);
+    return raw ? pickBestApplyLink(raw) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function normalizeJob(raw: RawJSearchJob): Partial<IJob> {
   return {
     externalJobId: raw.job_id,
     source: SOURCE_NAME,
     sourceUrl: raw.job_google_link ?? undefined,
-    applicationUrl: raw.job_apply_link ?? undefined,
+    applicationUrl: pickBestApplyLink(raw),
     title: raw.job_title,
     company: raw.employer_name || "Unknown",
     description: raw.job_description || "",

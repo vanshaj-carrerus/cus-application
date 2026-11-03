@@ -5,7 +5,22 @@ import { Candidate } from "@/lib/models/Candidate";
 
 // Fields a candidate may edit on their own profile. Deliberately excludes anything
 // recruiter/pipeline-owned: status, assignedRecruiterId, aiProfile, resumeFiles, etc.
-const EDITABLE_FIELDS = ["phone", "location", "expectedSalary", "currency", "noticePeriod", "preferredRoles", "preferredLocations"] as const;
+const EDITABLE_FIELDS = [
+  "phone",
+  "location",
+  "expectedSalary",
+  "currency",
+  "noticePeriod",
+  "preferredRoles",
+  "preferredLocations",
+  "workAuthorization",
+  "requiresSponsorship",
+  "willingToRelocate",
+  "address",
+  "linkedinUrl",
+  "portfolioUrl",
+  "githubUrl",
+] as const;
 
 function requireCandidateSession(user: { role: string; candidateId?: string }) {
   if (user.role !== "CANDIDATE" || !user.candidateId) {

@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "CUS Assist",
+  "version": "1.0.0",
+  "description": "Helps your recruiting team fill in job applications. You do the clicking and submitting; CUS Assist fills in the forms.",
+  "permissions": ["storage", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": { "default_title": "CUS Assist", "default_popup": "popup.html" }
+}

@@ -76,6 +76,8 @@ const STATUS_VARIANT: Record<string, "default" | "secondary" | "outline" | "succ
 const AUTOMATION_VARIANT: Record<string, "default" | "secondary" | "outline" | "success" | "warning" | "danger" | "info"> = {
   NOT_QUEUED: "secondary",
   QUEUED: "secondary",
+  READY_TO_APPLY: "warning",
+  APPLY_REQUESTED: "info",
   IN_PROGRESS: "info",
   AWAITING_REVIEW: "warning",
   SUBMITTED: "success",

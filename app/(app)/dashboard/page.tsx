@@ -1,5 +1,6 @@
 import { getCurrentUser } from "@/lib/auth/current-user";
 import { getCommandCenter } from "@/lib/services/dashboardService";
+import { getApplyQueueSummary } from "@/lib/services/applyQueueStats";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import Link from "next/link";
@@ -16,6 +17,7 @@ export default async function DashboardPage() {
   const user = await getCurrentUser();
   if (!user) return null;
   const data = await getCommandCenter(user.sub, user.role);
+  const apply = await getApplyQueueSummary(user.sub, user.role);
 
   return (
     <div className="mx-auto flex max-w-6xl flex-col gap-6">
@@ -25,6 +27,22 @@ export default async function DashboardPage() {
         </h1>
         <p className="mt-1 text-sm text-slate-500">Here&apos;s what needs your attention.</p>
       </div>
+
+      <Link href="/apply-queue">
+        <Card className="hover:shadow-md">
+          <CardContent className="flex flex-wrap items-center justify-between gap-3 p-4">
+            <div>
+              <div className="text-sm font-medium text-slate-900">Apply queue</div>
+              <div className="text-xs text-slate-500">
+                {apply.queue.ready} ready to apply · {apply.queue.inBrowser} open in a browser · {apply.queue.needsPreparing} need preparing
+              </div>
+            </div>
+            <div className="text-xs text-slate-600">
+              You applied <b>{apply.me.today}</b> today · <b>{apply.me.week}</b> in 7 days →
+            </div>
+          </CardContent>
+        </Card>
+      </Link>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
         <StatTile icon={Sparkles} label="High matches" value={data.stats.highMatchCandidates} />

@@ -49,7 +49,7 @@ export default function PortalOverviewPage() {
         </CardHeader>
         <CardContent>
           {applications.length === 0 ? (
-            <p className="text-sm text-slate-500">No applications yet — your recruiter will enroll you into auto-apply, or you can check back soon.</p>
+            <p className="text-sm text-slate-500">No applications yet. Your recruiting team finds matching jobs, prepares a tailored resume and cover letter for each, and applies for you. Check back soon.</p>
           ) : (
             <div className="flex flex-wrap gap-2">
               {Object.entries(counts).map(([status, count]) => (
@@ -72,9 +72,6 @@ export default function PortalOverviewPage() {
         <CardContent className="flex flex-col gap-2 text-sm">
           <Link href="/portal/profile" className="text-slate-700 underline">
             Update your profile & preferences
-          </Link>
-          <Link href="/portal/credentials" className="text-slate-700 underline">
-            Manage job board logins (for auto-apply)
           </Link>
         </CardContent>
       </Card>

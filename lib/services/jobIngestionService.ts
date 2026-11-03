@@ -5,13 +5,12 @@ import { Application } from "@/lib/models/Application";
 import { AutoApplyProfile, type IAutoApplyProfile } from "@/lib/models/AutoApplyProfile";
 import { SyncLog } from "@/lib/models/SyncLog";
 import { JobApiAdapter, type RawJSearchJob } from "@/lib/adapters/jobApiAdapter";
-import { resumeTailorQueue } from "@/lib/queue/queues";
 
 /**
  * Stage 1 of the auto-apply pipeline: fetch candidate jobs matches from JSearch,
  * dedupe/filter them, persist as Job docs, then stub out an Application per
- * (candidate, job) pair with status PENDING_MATCHING and hand off to the
- * resume-tailor queue. This is separate from the recruiter-facing jobSyncService,
+ * (candidate, job) pair with status PENDING_MATCHING. The caller then prepares
+ * them (see prepareApplications in resumeTailorService), right inside the request. This is separate from the recruiter-facing jobSyncService,
  * which only ingests jobs — it never creates Applications on a candidate's behalf.
  */
 
@@ -25,6 +24,8 @@ export interface IngestResult {
   applicationsSkippedExisting: number;
   applicationsSkippedNoRecruiter: number;
   applicationsSkippedDailyLimit: number;
+  /** Applications created by this run, still to be prepared (resume + cover letter). */
+  applicationIds: string[];
 }
 
 function buildQuery(profile: IAutoApplyProfile): string {
@@ -111,6 +112,7 @@ export async function ingestJobsForProfile(profileId: string): Promise<IngestRes
     applicationsSkippedExisting: 0,
     applicationsSkippedNoRecruiter: 0,
     applicationsSkippedDailyLimit: 0,
+    applicationIds: [],
   };
 
   // Reset the daily counter if it rolled over to a new day since the last run.
@@ -166,12 +168,7 @@ export async function ingestJobsForProfile(profileId: string): Promise<IngestRes
         resumeVersionId: profile.baseResumeId,
       });
       result.applicationsCreated++;
-
-      await resumeTailorQueue().add("tailor-for-application", {
-        applicationId: String(application._id),
-        candidateId: String(candidate._id),
-        jobId: String(job._id),
-      });
+      result.applicationIds.push(String(application._id));
     }
 
     profile.lastRunAt = now;
@@ -192,4 +189,81 @@ export async function ingestJobsForProfile(profileId: string): Promise<IngestRes
     await syncLog.save();
     throw err;
   }
+}
+
+export interface TargetedSearch {
+  candidateId: string;
+  /** One or more job titles; each is searched separately and the results are merged. */
+  titles: string[];
+  location?: string;
+  /** Most new applications to create from this run. */
+  count: number;
+  postedWithin: "today" | "3days" | "week" | "month" | "all";
+  remoteOnly?: boolean;
+  /** The marketer who started it; owns the application when the candidate has no assigned recruiter. */
+  requestedBy: string;
+}
+
+export interface TargetedResult {
+  fetched: number;
+  applicationsCreated: number;
+  skippedExisting: number;
+  invalid: number;
+  /** Applications created by this search, still to be prepared. */
+  applicationIds: string[];
+}
+
+/**
+ * A marketer-driven search for one candidate: the exact titles, place, recency and number they asked for, not the
+ * candidate's standing auto-apply profile. Each new job gets an Application (QUEUED); preparing it (resume +
+ * cover letter) makes it READY_TO_APPLY in the apply queue.
+ */
+export async function findJobsForCandidate(input: TargetedSearch): Promise<TargetedResult> {
+  await connectDB();
+  const candidate = await Candidate.findById(input.candidateId);
+  if (!candidate) throw new Error(`Candidate ${input.candidateId} not found`);
+
+  const result: TargetedResult = { fetched: 0, applicationsCreated: 0, skippedExisting: 0, invalid: 0, applicationIds: [] };
+  const seen = new Set<string>();
+  const titles = input.titles.map((t) => t.trim()).filter(Boolean);
+  const perPage = 10;
+
+  for (const title of titles) {
+    if (result.applicationsCreated >= input.count) break;
+    const stillNeeded = input.count - result.applicationsCreated;
+    const raw = await JobApiAdapter.fetchJobs({
+      query: input.location ? `${title} in ${input.location}` : title,
+      numPages: Math.min(5, Math.ceil(stillNeeded / perPage) + 1), // a spare page: some results are duplicates or invalid
+      datePosted: input.postedWithin,
+      remoteOnly: input.remoteOnly,
+    });
+    result.fetched += raw.length;
+
+    for (const r of raw) {
+      if (result.applicationsCreated >= input.count) break;
+      const { job, invalid } = await upsertJob(r);
+      if (invalid) {
+        result.invalid++;
+        continue;
+      }
+      if (!job || seen.has(String(job._id))) continue;
+      seen.add(String(job._id));
+
+      if (await Application.exists({ candidateId: candidate._id, jobId: job._id })) {
+        result.skippedExisting++;
+        continue;
+      }
+      const application = await Application.create({
+        candidateId: candidate._id,
+        jobId: job._id,
+        recruiterId: candidate.assignedRecruiterId ?? input.requestedBy,
+        status: "PENDING_MATCHING",
+        automationStatus: "QUEUED",
+        timeline: [{ status: "PENDING_MATCHING", note: `Found by search "${title}"${input.location ? ` in ${input.location}` : ""}`, changedBy: input.requestedBy, changedAt: new Date() }],
+      });
+      result.applicationsCreated++;
+      result.applicationIds.push(String(application._id));
+    }
+  }
+  return result;
 }

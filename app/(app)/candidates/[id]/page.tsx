@@ -10,6 +10,9 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Sparkles, Trash2 } from "lucide-react";
 import Link from "next/link";
 import { JOB_BOARDS } from "@/lib/models/enums";
+import { ApplicationDetailsCard } from "@/components/shared/application-details-card";
+import { SavedAnswersPanel } from "@/components/shared/saved-answers-panel";
+import { CandidateApplyPanel } from "@/components/shared/candidate-apply-panel";
 
 interface CandidateDetail {
   _id: string;
@@ -25,8 +28,8 @@ interface CandidateDetail {
   preferredLocations: string[];
   resumeText?: string;
   assignedRecruiterId?: string;
-  experience: { title: string; company: string; description?: string }[];
-  education: { institution: string; degree?: string; field?: string }[];
+  experience: ExperienceRow[];
+  education: EducationRow[];
   status: string;
   aiProfile?: {
     headline?: string;
@@ -38,6 +41,26 @@ interface CandidateDetail {
     potentialGaps?: string[];
   };
 }
+
+interface ExperienceRow {
+  title: string;
+  company: string;
+  startDate?: string;
+  endDate?: string;
+  isCurrent?: boolean;
+  description?: string;
+}
+
+interface EducationRow {
+  institution: string;
+  degree?: string;
+  field?: string;
+  startDate?: string;
+  endDate?: string;
+}
+
+const BLANK_EXPERIENCE: ExperienceRow = { title: "", company: "", startDate: "", endDate: "", isCurrent: false, description: "" };
+const BLANK_EDUCATION: EducationRow = { institution: "", degree: "", field: "", startDate: "", endDate: "" };
 
 interface AutoApplyProfileData {
   enabled: boolean;
@@ -82,9 +105,14 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
   const [editing, setEditing] = useState(false);
   const [editForm, setEditForm] = useState<Record<string, string>>({});
   const [savingEdit, setSavingEdit] = useState(false);
+  const [editExperience, setEditExperience] = useState<ExperienceRow[]>([]);
+  const [editEducation, setEditEducation] = useState<EducationRow[]>([]);
 
   const [profile, setProfile] = useState<AutoApplyProfileData>(EMPTY_PROFILE);
   const [profileId, setProfileId] = useState<string | null>(null);
+  // The comma-separated fields are edited as raw text and only split into lists on save. Deriving the
+  // input's value from the parsed list on every keystroke strips the trailing comma/space you just typed.
+  const [listText, setListText] = useState({ keywords: "", excludeKeywords: "", locations: "" });
   const [savingProfile, setSavingProfile] = useState(false);
   const [ingesting, setIngesting] = useState(false);
   const [ingestMessage, setIngestMessage] = useState<string | null>(null);
@@ -125,6 +153,11 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
         mode: profileData.profile.mode ?? "REVIEW_FIRST",
         requireCoverLetter: profileData.profile.requireCoverLetter ?? true,
       });
+      setListText({
+        keywords: joinList(profileData.profile.keywords),
+        excludeKeywords: joinList(profileData.profile.excludeKeywords),
+        locations: joinList(profileData.profile.locations),
+      });
     }
     setLoading(false);
   }, [id]);
@@ -157,6 +190,8 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
       preferredRoles: joinList(candidate.preferredRoles),
       preferredLocations: joinList(candidate.preferredLocations),
     });
+    setEditExperience(candidate.experience.map((e) => ({ ...BLANK_EXPERIENCE, ...e })));
+    setEditEducation(candidate.education.map((e) => ({ ...BLANK_EDUCATION, ...e })));
     setEditing(true);
   }
 
@@ -176,6 +211,11 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
           noticePeriod: editForm.noticePeriod || undefined,
           preferredRoles: splitList(editForm.preferredRoles),
           preferredLocations: splitList(editForm.preferredLocations),
+          // Rows left blank are dropped; a current job has no end date.
+          experience: editExperience
+            .filter((e) => e.title?.trim() || e.company?.trim())
+            .map((e) => ({ ...e, title: e.title.trim(), company: e.company.trim(), endDate: e.isCurrent ? "" : e.endDate })),
+          education: editEducation.filter((e) => e.institution?.trim()).map((e) => ({ ...e, institution: e.institution.trim() })),
         }),
       });
       setEditing(false);
@@ -199,10 +239,24 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
       const res = await fetch(`/api/candidates/${id}/auto-apply-profile`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(profile),
+        body: JSON.stringify({
+          ...profile,
+          keywords: splitList(listText.keywords),
+          excludeKeywords: splitList(listText.excludeKeywords),
+          locations: splitList(listText.locations),
+        }),
       });
       const data = await res.json();
       setProfileId(data.profile?._id ?? null);
+      if (data.profile) {
+        // Show the list as it was actually saved (trimmed, empty entries dropped).
+        setProfile((p) => ({ ...p, keywords: data.profile.keywords ?? [], excludeKeywords: data.profile.excludeKeywords ?? [], locations: data.profile.locations ?? [] }));
+        setListText({
+          keywords: joinList(data.profile.keywords),
+          excludeKeywords: joinList(data.profile.excludeKeywords),
+          locations: joinList(data.profile.locations),
+        });
+      }
     } finally {
       setSavingProfile(false);
     }
@@ -222,7 +276,7 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
         body: JSON.stringify({ profileId }),
       });
       const data = await res.json();
-      setIngestMessage(res.ok ? `Queued (job ${data.jobId}). Check /applications shortly.` : (data.error ?? "Failed to queue ingestion"));
+      setIngestMessage(res.ok ? `Done: ${data.applicationsCreated} new job(s), ${data.prepared} ready to apply${data.failed ? `, ${data.failed} need a retry` : ""}. Open the Apply queue.` : (data.error ?? "Run failed"));
     } finally {
       setIngesting(false);
     }
@@ -231,7 +285,7 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
   async function handleDelete() {
     if (
       !confirm(
-        "Delete this candidate? This also deletes their applications, resumes, auto-apply profile, saved job-board credentials, and portal login. This cannot be undone."
+        "Delete this candidate? This also deletes their applications, resumes, auto-apply profile, and portal login. This cannot be undone."
       )
     )
       return;
@@ -301,6 +355,9 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
           </p>
         </div>
         <div className="flex gap-2">
+          <Button asChild>
+            <Link href={`/apply-queue?candidateId=${id}`}>Apply queue</Link>
+          </Button>
           <Button asChild variant="secondary">
             <Link href={`/applications?candidateId=${id}`}>View Applications</Link>
           </Button>
@@ -320,6 +377,8 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
           </Button>
         </div>
       </div>
+
+      <CandidateApplyPanel candidateId={id} />
 
       {showPortalPanel && (
         <Card>
@@ -454,6 +513,72 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
               <label className="mb-1 block text-xs font-medium text-slate-600">Preferred Locations (comma-separated)</label>
               <Input value={editForm.preferredLocations} onChange={(e) => setEditForm((f) => ({ ...f, preferredLocations: e.target.value }))} />
             </div>
+            <div className="flex flex-col gap-3 border-t border-slate-100 pt-3">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-medium text-slate-900">Experience</div>
+                <Button type="button" variant="secondary" size="sm" onClick={() => setEditExperience((list) => [...list, { ...BLANK_EXPERIENCE }])}>
+                  + Add experience
+                </Button>
+              </div>
+              {editExperience.length === 0 && <p className="text-xs text-slate-500">No experience yet.</p>}
+              {editExperience.map((row, i) => {
+                const set = (patch: Partial<ExperienceRow>) => setEditExperience((list) => list.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+                return (
+                  <div key={i} className="flex flex-col gap-2 rounded-md border border-slate-200 p-3">
+                    <div className="grid grid-cols-2 gap-2">
+                      <Input placeholder="Job title" value={row.title} onChange={(e) => set({ title: e.target.value })} />
+                      <Input placeholder="Company" value={row.company} onChange={(e) => set({ company: e.target.value })} />
+                      <Input placeholder="Start (e.g. Jan 2021)" value={row.startDate ?? ""} onChange={(e) => set({ startDate: e.target.value })} />
+                      <Input placeholder="End (e.g. Mar 2024)" value={row.isCurrent ? "" : (row.endDate ?? "")} disabled={row.isCurrent} onChange={(e) => set({ endDate: e.target.value })} />
+                    </div>
+                    <label className="flex items-center gap-2 text-xs text-slate-600">
+                      <input type="checkbox" checked={!!row.isCurrent} onChange={(e) => set({ isCurrent: e.target.checked })} />
+                      I currently work here
+                    </label>
+                    <textarea
+                      className="min-h-20 rounded-md border border-slate-200 px-3 py-2 text-sm"
+                      placeholder="What they did there (responsibilities, achievements)"
+                      value={row.description ?? ""}
+                      onChange={(e) => set({ description: e.target.value })}
+                    />
+                    <div className="flex justify-end">
+                      <Button type="button" variant="ghost" size="sm" onClick={() => setEditExperience((list) => list.filter((_, j) => j !== i))}>
+                        Remove
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex flex-col gap-3 border-t border-slate-100 pt-3">
+              <div className="flex items-center justify-between">
+                <div className="text-sm font-medium text-slate-900">Education</div>
+                <Button type="button" variant="secondary" size="sm" onClick={() => setEditEducation((list) => [...list, { ...BLANK_EDUCATION }])}>
+                  + Add education
+                </Button>
+              </div>
+              {editEducation.length === 0 && <p className="text-xs text-slate-500">No education yet.</p>}
+              {editEducation.map((row, i) => {
+                const set = (patch: Partial<EducationRow>) => setEditEducation((list) => list.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+                return (
+                  <div key={i} className="flex flex-col gap-2 rounded-md border border-slate-200 p-3">
+                    <div className="grid grid-cols-2 gap-2">
+                      <Input className="col-span-2" placeholder="School / university" value={row.institution} onChange={(e) => set({ institution: e.target.value })} />
+                      <Input placeholder="Degree (e.g. B.Tech)" value={row.degree ?? ""} onChange={(e) => set({ degree: e.target.value })} />
+                      <Input placeholder="Field of study" value={row.field ?? ""} onChange={(e) => set({ field: e.target.value })} />
+                      <Input placeholder="Start (e.g. 2017)" value={row.startDate ?? ""} onChange={(e) => set({ startDate: e.target.value })} />
+                      <Input placeholder="End (e.g. 2021)" value={row.endDate ?? ""} onChange={(e) => set({ endDate: e.target.value })} />
+                    </div>
+                    <div className="flex justify-end">
+                      <Button type="button" variant="ghost" size="sm" onClick={() => setEditEducation((list) => list.filter((_, j) => j !== i))}>
+                        Remove
+                      </Button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
             <div className="flex justify-end gap-2 pt-2">
               <Button onClick={saveEdit} disabled={savingEdit}>
                 {savingEdit ? "Saving…" : "Save Changes"}
@@ -529,10 +654,16 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
           <CardTitle>Experience</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
+          {candidate.experience.length === 0 && <p className="text-sm text-slate-500">None yet. Use Edit Details to add experience.</p>}
           {candidate.experience.map((e, i) => (
             <div key={i}>
               <div className="text-sm font-medium text-slate-900">
                 {e.title} · {e.company}
+                {(e.startDate || e.endDate || e.isCurrent) && (
+                  <span className="ml-2 text-xs font-normal text-slate-500">
+                    {e.startDate} – {e.isCurrent ? "Present" : e.endDate}
+                  </span>
+                )}
               </div>
               {e.description && <p className="text-xs text-slate-500">{e.description}</p>}
             </div>
@@ -545,17 +676,27 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
           <CardTitle>Education</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-2">
+          {candidate.education.length === 0 && <p className="text-sm text-slate-500">None yet. Use Edit Details to add education.</p>}
           {candidate.education.map((e, i) => (
             <div key={i} className="text-sm text-slate-700">
               {e.degree} {e.field} — {e.institution}
+              {(e.startDate || e.endDate) && (
+                <span className="ml-2 text-xs text-slate-500">
+                  {e.startDate} – {e.endDate}
+                </span>
+              )}
             </div>
           ))}
         </CardContent>
       </Card>
 
+      <ApplicationDetailsCard endpoint={`/api/candidates/${id}`} audience="staff" />
+
+      <SavedAnswersPanel baseUrl={`/api/candidates/${id}/answers`} audience="staff" />
+
       <Card>
         <CardHeader>
-          <CardTitle>Auto-Apply Settings</CardTitle>
+          <CardTitle>Saved search (optional, for repeat runs)</CardTitle>
         </CardHeader>
         <CardContent className="flex flex-col gap-3">
           <label className="flex items-center gap-2 text-sm text-slate-700">
@@ -566,18 +707,18 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
           <div>
             <label className="mb-1 block text-xs font-medium text-slate-600">Keywords (comma-separated — used as the job search query)</label>
             <Input
-              value={joinList(profile.keywords)}
-              onChange={(e) => setProfile((p) => ({ ...p, keywords: splitList(e.target.value) }))}
+              value={listText.keywords}
+              onChange={(e) => setListText((t) => ({ ...t, keywords: e.target.value }))}
               placeholder="senior react developer"
             />
           </div>
           <div>
             <label className="mb-1 block text-xs font-medium text-slate-600">Exclude keywords (comma-separated)</label>
-            <Input value={joinList(profile.excludeKeywords)} onChange={(e) => setProfile((p) => ({ ...p, excludeKeywords: splitList(e.target.value) }))} />
+            <Input value={listText.excludeKeywords} onChange={(e) => setListText((t) => ({ ...t, excludeKeywords: e.target.value }))} />
           </div>
           <div>
             <label className="mb-1 block text-xs font-medium text-slate-600">Locations (comma-separated)</label>
-            <Input value={joinList(profile.locations)} onChange={(e) => setProfile((p) => ({ ...p, locations: splitList(e.target.value) }))} />
+            <Input value={listText.locations} onChange={(e) => setListText((t) => ({ ...t, locations: e.target.value }))} />
           </div>
 
           <div>
@@ -620,7 +761,7 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
                 {savingProfile ? "Saving…" : "Save Auto-Apply Settings"}
               </Button>
               <Button variant="secondary" onClick={runIngestionNow} disabled={ingesting || !profileId}>
-                {ingesting ? "Queuing…" : "Run Ingestion Now"}
+                {ingesting ? "Finding jobs and preparing documents…" : "Run Ingestion Now"}
               </Button>
             </div>
           </div>

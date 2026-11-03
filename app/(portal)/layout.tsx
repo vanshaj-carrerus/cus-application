@@ -16,17 +16,14 @@ export default async function PortalLayout({ children }: { children: React.React
           <Link href="/portal" className="py-3 hover:text-slate-900">
             Overview
           </Link>
+          <Link href="/portal/apply-queue" className="py-3 hover:text-slate-900">
+            Apply Queue
+          </Link>
           <Link href="/portal/applications" className="py-3 hover:text-slate-900">
             My Applications
           </Link>
           <Link href="/portal/profile" className="py-3 hover:text-slate-900">
             My Profile
-          </Link>
-          <Link href="/portal/credentials" className="py-3 hover:text-slate-900">
-            Job Board Logins
-          </Link>
-          <Link href="/portal/gmail" className="py-3 hover:text-slate-900">
-            Email Access
           </Link>
         </nav>
       </div>

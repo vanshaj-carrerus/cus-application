@@ -31,6 +31,15 @@ export interface ICandidateAiProfile {
   model?: string;
 }
 
+export interface ICandidateAddress {
+  line1?: string;
+  line2?: string;
+  city?: string;
+  state?: string;
+  postalCode?: string;
+  country?: string;
+}
+
 export interface ICandidate extends Document {
   name: string;
   email?: string;
@@ -49,6 +58,15 @@ export interface ICandidate extends Document {
   noticePeriod?: string;
   expectedSalary?: number;
   currency?: string;
+  // Facts application forms ask for. The apply flow only ever answers a question with what is
+  // recorded here — a field left unset means the application stops for a human, never a guess.
+  workAuthorization?: string; // e.g. "US citizen", "H-1B", "Authorized to work in India"
+  requiresSponsorship?: boolean;
+  willingToRelocate?: boolean;
+  address?: ICandidateAddress;
+  linkedinUrl?: string;
+  portfolioUrl?: string;
+  githubUrl?: string;
   preferredRoles: string[];
   preferredLocations: string[];
   resumeFiles: { url: string; filename: string; uploadedAt: Date }[];
@@ -98,6 +116,13 @@ const CandidateSchema = new Schema<ICandidate>(
     noticePeriod: String,
     expectedSalary: Number,
     currency: String,
+    workAuthorization: String,
+    requiresSponsorship: Boolean,
+    willingToRelocate: Boolean,
+    address: { line1: String, line2: String, city: String, state: String, postalCode: String, country: String },
+    linkedinUrl: String,
+    portfolioUrl: String,
+    githubUrl: String,
     preferredRoles: { type: [String], default: [] },
     preferredLocations: { type: [String], default: [] },
     resumeFiles: [{ url: String, filename: String, uploadedAt: Date }],

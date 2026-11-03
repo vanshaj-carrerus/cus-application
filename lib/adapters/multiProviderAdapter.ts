@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { env } from "@/lib/env";
+import { aiLimiter } from "@/lib/concurrency/limiter";
 
 /**
  * Multi-provider JSON-completion chain for Stage 2 tailoring: Gemini -> Mistral -> Groq
@@ -172,7 +173,11 @@ async function tryOpenRouter<T>(prompt: string): Promise<EngineResult<T>> {
 }
 
 /** Runs a JSON-completion prompt through Gemini -> Mistral -> Groq -> OpenRouter, first one to succeed wins. */
-export async function runJsonPrompt<T>(prompt: string): Promise<EngineResult<T>> {
+export function runJsonPrompt<T>(prompt: string): Promise<EngineResult<T>> {
+  return aiLimiter().run(() => runJsonPromptOnce<T>(prompt));
+}
+
+async function runJsonPromptOnce<T>(prompt: string): Promise<EngineResult<T>> {
   try {
     return await tryGemini<T>(prompt);
   } catch (geminiError) {

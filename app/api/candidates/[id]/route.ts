@@ -6,7 +6,6 @@ import { Application } from "@/lib/models/Application";
 import { ApplicationAttempt } from "@/lib/models/ApplicationAttempt";
 import { Resume } from "@/lib/models/Resume";
 import { AutoApplyProfile } from "@/lib/models/AutoApplyProfile";
-import { JobBoardCredential } from "@/lib/models/JobBoardCredential";
 import { User } from "@/lib/models/User";
 import { deleteStoredFile } from "@/lib/storage/fileStorage";
 
@@ -28,7 +27,7 @@ export const PATCH = withAuth(async (req: NextRequest, { params }) => {
 /**
  * Deleting a candidate cascades through everything that only makes sense tied to
  * them: applications (and their automation attempts), resume versions and their
- * stored files, the auto-apply profile, saved job-board credentials, and the
+ * stored files, the auto-apply profile, and the
  * portal login account. Nothing here is meaningful once the candidate is gone.
  */
 export const DELETE = withAuth(async (_req: NextRequest, { params }) => {
@@ -44,7 +43,6 @@ export const DELETE = withAuth(async (_req: NextRequest, { params }) => {
   await Resume.deleteMany({ candidateId: candidate._id });
 
   await AutoApplyProfile.deleteMany({ candidateId: candidate._id });
-  await JobBoardCredential.deleteMany({ candidateId: candidate._id });
   await User.deleteMany({ candidateId: candidate._id, role: "CANDIDATE" });
 
   await candidate.deleteOne();
