@@ -9,6 +9,9 @@ import {
   type AssistCandidate,
   type JobInfo,
 } from "../../lib/automation/formEngine";
+import { runLinkedInSyncIfAsked } from "./linkedin";
+import { runExternalApplyIfAsked } from "./external-apply";
+import { runPortalApplyIfAsked } from "./portals/registry";
 
 /**
  * CUS Assist, the page side. It does two things and nothing else:
@@ -34,7 +37,7 @@ const send = <T = unknown>(message: Record<string, unknown>): Promise<T | null> 
 if (isTop) {
   const reply = (type: string, payload: Record<string, unknown> = {}) => window.postMessage({ source: "cus-assist", type, ...payload }, location.origin);
   window.addEventListener("message", async (event) => {
-    const data = event.data as { source?: string; type?: string; token?: string; applicationId?: string } | null;
+    const data = event.data as { source?: string; type?: string; token?: string; applicationId?: string; portal?: string; candidateId?: string } | null;
     if (event.source !== window || data?.source !== "cus-portal") return;
 
     if (data.type === "PING") {
@@ -45,6 +48,12 @@ if (isTop) {
       if (!confirm(`Connect CUS Assist to ${location.origin}?\n\nOnly click OK if you just pressed "Connect extension" in your company's portal.`)) return reply("PAIRED", { ok: false });
       const r = await send<{ ok: boolean }>({ type: "pair", token: data.token });
       reply("PAIRED", { ok: !!r?.ok });
+    } else if (data.type === "PORTAL_SYNC" && data.portal) {
+      const r = await send<{ ok: boolean; error?: string }>({ type: "portalSync", portal: data.portal, candidateId: data.candidateId });
+      reply("PORTAL_SYNC_RESULT", { portal: data.portal, ok: !!r?.ok, error: r?.ok ? undefined : (r?.error ?? "The extension didn't answer. Reload the portal page.") });
+    } else if (data.type === "PORTAL_APPLY" && data.portal) {
+      const r = await send<{ ok: boolean; error?: string }>({ type: "portalApply", portal: data.portal, candidateId: data.candidateId });
+      reply("PORTAL_APPLY_RESULT", { portal: data.portal, ok: !!r?.ok, error: r?.ok ? undefined : (r?.error ?? "The extension didn't answer. Reload the portal page.") });
     } else if (data.type === "APPLY" && data.applicationId) {
       const r = await send<{ ok: boolean; error?: string }>({ type: "apply", applicationId: data.applicationId });
       reply("APPLY_RESULT", { applicationId: data.applicationId, ok: !!r?.ok, error: r?.ok ? undefined : (r?.error ?? "The extension didn't answer. Reload the portal page.") });
@@ -274,3 +283,6 @@ async function boot() {
   }
 }
 void boot();
+void runLinkedInSyncIfAsked(send);
+void runExternalApplyIfAsked(send);
+void runPortalApplyIfAsked(send);

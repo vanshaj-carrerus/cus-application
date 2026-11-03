@@ -19,6 +19,7 @@ await build({
     background: path.join(root, "extension", "src", "background.ts"),
     content: path.join(root, "extension", "src", "content.ts"),
     popup: path.join(root, "extension", "src", "popup.ts"),
+    "main-world": path.join(root, "extension", "src", "main-world.ts"),
   },
   outdir: dist,
   bundle: true,

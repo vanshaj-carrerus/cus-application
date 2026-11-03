@@ -18,3 +18,6 @@ export * from "./AiConversation";
 export * from "./AiAction";
 export * from "./AutoApplyProfile";
 export * from "./ApplicationAttempt";
+export * from "./PortalConnection";
+export * from "./PortalSnapshot";
+export * from "./PortalJobClaim";

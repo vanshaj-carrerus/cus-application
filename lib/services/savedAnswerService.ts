@@ -17,6 +17,8 @@ export class AnswerError extends Error {
 
 /** Questions waiting for a person first, then answered ones, newest first. */
 export async function listAnswers(candidateId: string) {
+  // Earlier runs saved some questions under a field id ("radio-group-_r_1q_") instead of the question's words. Nobody can answer those.
+  await SavedAnswer.deleteMany({ candidateId, status: "NEEDED", source: "BOT", question: { $regex: "^[A-Za-z0-9_.:]*[-_0-9][A-Za-z0-9_.:-]*$" } });
   const rows = await SavedAnswer.find({ candidateId }).sort({ updatedAt: -1 }).lean();
   return rows.sort((a, b) => Number(b.status === "NEEDED") - Number(a.status === "NEEDED"));
 }

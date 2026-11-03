@@ -25,10 +25,28 @@ export interface AssistCandidate {
 
 const SKIP_ZONE = 'header, nav, footer, [role="banner"], [role="navigation"], [role="search"], [hidden], [aria-hidden="true"]';
 
+/** A host's shadow root, open or closed: extensions may read closed ones through chrome.dom, and some sites (LinkedIn) close theirs. */
+const closedRoots = new WeakMap<Element, ShadowRoot | null>();
+export function shadowOf(host: Element): ShadowRoot | null {
+  if (host.shadowRoot) return host.shadowRoot;
+  // The extension call only accepts HTML elements (it throws on SVG icons, which every page has) and is slow enough to ask once per element.
+  if (!(host instanceof HTMLElement)) return null;
+  if (closedRoots.has(host)) return closedRoots.get(host) ?? null;
+  const dom = (globalThis as { chrome?: { dom?: { openOrClosedShadowRoot?: (el: HTMLElement) => ShadowRoot | null } } }).chrome?.dom;
+  let root: ShadowRoot | null = null;
+  try {
+    root = dom?.openOrClosedShadowRoot?.(host) ?? null;
+  } catch {
+    root = null;
+  }
+  closedRoots.set(host, root);
+  return root;
+}
+
 function deepAll<T extends Element>(selector: string, root: ParentNode = document): T[] {
   const found: T[] = Array.from(root.querySelectorAll<T>(selector));
   for (const host of Array.from(root.querySelectorAll("*"))) {
-    const shadow = (host as HTMLElement).shadowRoot;
+    const shadow = shadowOf(host as HTMLElement);
     if (shadow) found.push(...deepAll<T>(selector, shadow));
   }
   return found;
@@ -69,6 +87,8 @@ export interface QuestionResult {
   skipped: Array<{ label: string; required: boolean; reason: string }>;
   /** Labels of required questions that are still empty — the application must not be submitted. */
   requiredMissing: string[];
+  /** Labels of questions only the candidate can answer (saved on their profile). */
+  needsPerson: string[];
   /** Answers a person had saved that were used, and questions saved for a person to answer once. */
   fromSaved: number;
   savedForPerson: number;
@@ -85,7 +105,7 @@ export function extractQuestions(): FormQuestion[] {
       const deepAll = <T extends Element>(selector: string, root: ParentNode = document): T[] => {
         const found: T[] = Array.from(root.querySelectorAll<T>(selector));
         for (const host of Array.from(root.querySelectorAll("*"))) {
-          const shadow = (host as HTMLElement).shadowRoot;
+          const shadow = shadowOf(host as HTMLElement);
           if (shadow) found.push(...deepAll<T>(selector, shadow));
         }
         return found;
@@ -134,6 +154,46 @@ export function extractQuestions(): FormQuestion[] {
         const wrap = el.closest("label");
         if (wrap && raw(wrap)) return raw(wrap);
         return "";
+      };
+
+      // The text of each option in a radio/checkbox group. Some sites (LinkedIn) point every option's aria-label or
+      // aria-labelledby at the question itself, so a way of reading the options is only trusted if it gives every
+      // option different text ("Yes" / "No"), never the question repeated.
+      const optionTextsOf = (opts: HTMLInputElement[]): string[] => {
+        const readers: Array<(o: HTMLInputElement) => string> = [
+          (o) => (o.id ? raw(rootOf(o).querySelector(`label[for="${CSS.escape(o.id)}"]`)) : ""),
+          (o) => raw(o.closest("label")),
+          (o) => raw(o.nextElementSibling),
+          (o) => raw(o.parentElement),
+          (o) => o.value ?? "",
+          (o) => o.getAttribute("aria-label") ?? "",
+          (o) =>
+            (o.getAttribute("aria-labelledby") ?? "")
+              .split(/\s+/)
+              .map((id) => raw(rootOf(o).getElementById(id)))
+              .filter(Boolean)
+              .join(" "),
+        ];
+        for (const read of readers) {
+          const texts = opts.map((o) => clean(read(o)));
+          if (texts.every(Boolean) && new Set(texts.map((t) => t.toLowerCase())).size === texts.length) return texts;
+        }
+        return opts.map((o) => clean(ownLabel(o) || raw(o.nextElementSibling) || raw(o.parentElement)));
+      };
+
+      // The question, when every option of a group carries the same aria-label / aria-labelledby text: that text is the group's question.
+      const sharedLabelOf = (opts: HTMLInputElement[]): string => {
+        const texts = opts.map((o) =>
+          clean(
+            o.getAttribute("aria-label") ||
+              (o.getAttribute("aria-labelledby") ?? "")
+                .split(/\s+/)
+                .map((id) => raw(rootOf(o).getElementById(id)))
+                .filter(Boolean)
+                .join(" ")
+          )
+        );
+        return texts[0] && texts.every((t) => t === texts[0]) ? texts[0] : "";
       };
 
       // The question text for a field or a radio/checkbox group: the nearest preceding label-like
@@ -228,8 +288,8 @@ export function extractQuestions(): FormQuestion[] {
             seenGroups.set(groupKey, -1);
             continue;
           }
-          const optionTexts = optionEls.map((o) => clean(ownLabel(o) || raw(o.nextElementSibling) || raw(o.parentElement)));
-          const q = questionText(optionEls[0], optionTexts) || name;
+          const optionTexts = optionTextsOf(optionEls);
+          const q = sharedLabelOf(optionEls) || questionText(optionEls[0], optionTexts) || name;
           const id = `q${counter++}`;
           seenGroups.set(groupKey, counter);
           optionEls.forEach((o, i) => mark(o, id, i));
@@ -291,6 +351,20 @@ const DECLINE_OPTION = /decline|prefer not|do not wish|don'?t wish|not wish to|c
 const NEVER_FILL = /social security|\bssn\b|aadhaar|aadhar|\bpan (card|number)\b|passport|national id|tax id|bank|account number|credit card|driver'?s? licen[cs]e/i;
 // Privacy/terms consent needed just to apply — the candidate authorised the application by enrolling.
 const CONSENT = /\b(agree|consent|acknowledge|accept|have read|understand)\b.*\b(privacy|terms|policy|data|processing|conditions|notice|storage|retention|gdpr)\b|^\s*i agree\s*$|^\s*i accept\s*$/i;
+/**
+ * Questions that come up on many forms and always get the same answer, so they go to neither the AI nor the candidate.
+ * true = yes / ticked, false = no / left alone.
+ */
+const STANDING_ANSWERS: Array<{ match: RegExp; answer: boolean }> = [
+  { match: /\b(set|create|turn on)\s+(an?\s+)?(job\s+)?alerts?\b/i, answer: true }, // "Set alert for similar jobs as <title>"
+  { match: /\bmark\s+(this\s+|the\s+)?job\s+as\s+(a\s+)?top\s+choice\b/i, answer: false }, // "Mark job as a top choice"
+];
+
+/** The fixed answer for a recurring question, or null if there is none. */
+export function standingAnswer(label: string): boolean | null {
+  return STANDING_ANSWERS.find((r) => r.match.test(label))?.answer ?? null;
+}
+
 // Attestations of truth/eligibility are the candidate's statement to make.
 const ATTESTATION = /\b(certify|attest|declare|affirm|swear|under penalty|true and (correct|complete)|accurate and complete)\b/i;
 
@@ -344,6 +418,13 @@ export function plan(question: FormQuestion, model: ModelAnswer | undefined, fro
   const skip = (reason: string): Planned => ({ question, skip: reason });
 
   if (NEVER_FILL.test(label)) return skip("government/financial identifier — never filled automatically");
+
+  const standing = standingAnswer(label);
+  if (standing !== null) {
+    if (question.kind === "checkbox") return standing ? { question, value: true, display: "ticked (standing answer)" } : skip("standing answer: left off");
+    const idx = (question.kind === "select" || question.kind === "radio") && question.options ? matchOption(standing ? "yes" : "no", question.options) : null;
+    return idx !== null ? { question, value: [idx], display: `${question.options![idx]} (standing answer)` } : skip("standing answer: nothing to choose");
+  }
 
   if (question.kind === "checkbox") {
     if (/\[(yes|no)\]$/i.test(label)) return skip("bare Yes/No checkbox — ambiguous, left for a human");
@@ -407,7 +488,7 @@ export function hasVisibleForm(): boolean {
       const deepAll = <T extends Element>(selector: string, root: ParentNode = document): T[] => {
         const found: T[] = Array.from(root.querySelectorAll<T>(selector));
         for (const host of Array.from(root.querySelectorAll("*"))) {
-          const shadow = (host as HTMLElement).shadowRoot;
+          const shadow = shadowOf(host as HTMLElement);
           if (shadow) found.push(...deepAll<T>(selector, shadow));
         }
         return found;
@@ -667,18 +748,19 @@ function applyPlanned(p: Extract<Planned, { value: unknown }>): { ok: boolean; r
  * answers first, then the AI via the portal). `requiredMissing` lists required questions left empty for the person.
  */
 export async function runQuestions(job: JobInfo, coverLetter: string | undefined, backend: AnswerBackend): Promise<QuestionResult> {
-  const result: QuestionResult = { asked: 0, filled: [], skipped: [], requiredMissing: [], fromSaved: 0, savedForPerson: 0 };
+  const result: QuestionResult = { asked: 0, filled: [], skipped: [], requiredMissing: [], needsPerson: [], fromSaved: 0, savedForPerson: 0 };
   const questions = extractQuestions().filter((q) => q.label || q.kind === "checkbox");
   result.asked = questions.length;
   if (questions.length === 0) return result;
 
-  const saved = await backend.lookupSaved(questions.filter((q) => !NEVER_FILL.test(q.label)).map((q) => ({ id: q.id, label: q.label }))).catch(() => new Map<string, { answer: string; savedId: string }>());
+  const saved = await backend.lookupSaved(questions.filter((q) => !NEVER_FILL.test(q.label) && standingAnswer(q.label) === null).map((q) => ({ id: q.id, label: q.label }))).catch(() => new Map<string, { answer: string; savedId: string }>());
 
   const askable = questions.filter(
     (q) =>
       q.kind !== "combobox" &&
       !saved.has(q.id) &&
       !NEVER_FILL.test(q.label) &&
+      standingAnswer(q.label) === null &&
       !SELF_ID.test(q.label) &&
       !(q.kind === "checkbox" && (CONSENT.test(q.label) || ATTESTATION.test(q.label) || /\[(yes|no)\]$/i.test(q.label)))
   );
@@ -702,9 +784,11 @@ export async function runQuestions(job: JobInfo, coverLetter: string | undefined
     const planned = plan(question, byId.get(question.id), !!person);
     if ("skip" in planned) {
       result.skipped.push({ label: question.label, required: question.required, reason: planned.skip });
-      if (question.required) {
-        result.requiredMissing.push(question.label || "(unlabelled required field)");
-        if (ANSWERABLE_BY_PERSON.test(planned.skip) && question.label) needed.push({ label: question.label, options: question.options });
+      if (question.required) result.requiredMissing.push(question.label || "(unlabelled required field)");
+      // Every question the profile can't answer is saved for the candidate to answer once (required or not), so the next form that asks it is answered.
+      if (ANSWERABLE_BY_PERSON.test(planned.skip) && question.label) {
+        needed.push({ label: question.label, options: question.options });
+        result.needsPerson.push(question.label);
       }
       continue;
     }
