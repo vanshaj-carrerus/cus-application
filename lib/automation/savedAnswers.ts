@@ -68,6 +68,12 @@ export async function markAnswersUsed(savedIds: string[]): Promise<void> {
   await SavedAnswer.updateMany({ _id: { $in: savedIds } }, { $inc: { timesUsed: 1 }, $set: { lastUsedAt: new Date() } });
 }
 
+/** An element id or field name that was read in place of the question ("radio-group-_r_1q_", "q12"): not something a person can answer. */
+export function looksLikeFieldId(label: string): boolean {
+  const t = label.trim();
+  return !/ /.test(t) && /^[A-Za-z0-9_.:-]+$/.test(t) && /[-_0-9]/.test(t);
+}
+
 /**
  * Remember required questions the bot could not answer, so a person answers each ONCE. Never overwrites an existing
  * row (an ANSWERED one stays as it is); a NEEDED one just keeps its first-seen details.
@@ -76,7 +82,7 @@ export async function recordNeededQuestions(candidateId: Types.ObjectId | string
   let created = 0;
   for (const q of questions) {
     const questionKey = normalizeQuestion(q.label);
-    if (!questionKey || questionKey.length < 4) continue;
+    if (!questionKey || questionKey.length < 4 || looksLikeFieldId(q.label)) continue;
     const exists = await SavedAnswer.exists({ candidateId, questionKey });
     if (exists) continue;
     // A close wording of something already answered is covered by lookup; don't ask the person twice.

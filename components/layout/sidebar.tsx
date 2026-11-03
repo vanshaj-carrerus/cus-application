@@ -13,6 +13,7 @@ import {
   UserCog,
   ShieldCheck,
   Settings,
+  Plug,
   Sparkles,
   type LucideIcon,
 } from "lucide-react";
@@ -31,6 +32,7 @@ const ICONS: Record<string, LucideIcon> = {
   UserCog,
   ShieldCheck,
   Settings,
+  Plug,
 };
 
 export function Sidebar({ role }: { role: Role }) {

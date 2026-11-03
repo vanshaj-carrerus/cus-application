@@ -40,8 +40,22 @@ export async function requestApply(applicationId: string): Promise<{ ok: boolean
   return { ok: !!reply.ok, error: reply.error };
 }
 
+/** Asks the extension to read a portal account (LinkedIn) from this browser. Staff pass the candidate; a candidate login omits it. */
+export async function requestPortalSync(portal: string, candidateId?: string): Promise<{ ok: boolean; error?: string }> {
+  const reply = await ask<{ type: string; portal?: string; ok?: boolean; error?: string }>({ type: "PORTAL_SYNC", portal, candidateId }, "PORTAL_SYNC_RESULT", 30_000, (m) => m.portal === portal);
+  if (!reply) return { ok: false, error: "The extension didn't respond. Reinstall the latest extension, then reload this page." };
+  return { ok: !!reply.ok, error: reply.error };
+}
+
+/** Starts an auto-apply run on a portal in this browser (the Start button). Staff pass the candidate; a candidate login omits it. */
+export async function requestPortalApply(portal: string, candidateId?: string): Promise<{ ok: boolean; error?: string }> {
+  const reply = await ask<{ type: string; portal?: string; ok?: boolean; error?: string }>({ type: "PORTAL_APPLY", portal, candidateId }, "PORTAL_APPLY_RESULT", 30_000, (m) => m.portal === portal);
+  if (!reply) return { ok: false, error: "The extension didn't respond. Reinstall the latest extension, then reload this page." };
+  return { ok: !!reply.ok, error: reply.error };
+}
+
 /** One-time setup: install the extension, then connect it to this person's login. */
-export function HelperSetup({ onStatus }: { onStatus?: (s: { installed: boolean; paired: boolean }) => void }) {
+export function HelperSetup({ onStatus, compact = false }: { onStatus?: (s: { installed: boolean; paired: boolean }) => void; compact?: boolean }) {
   const [state, setState] = useState<{ installed: boolean; paired: boolean } | null>(null);
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
@@ -85,6 +99,18 @@ export function HelperSetup({ onStatus }: { onStatus?: (s: { installed: boolean;
 
   if (state === null) return null;
   const { installed, paired } = state;
+
+  // Once connected, a compact page only needs a quiet line, not a whole box.
+  if (compact && paired && !open) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-slate-500">
+        <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-emerald-700">extension connected</span>
+        <button className="underline" onClick={() => setOpen(true)}>
+          Reconnect or reinstall
+        </button>
+      </div>
+    );
+  }
 
   return (
     <Card id="helper-setup">

@@ -15,6 +15,7 @@ export const NAV_ITEMS: NavItem[] = [
   { href: "/resumes", label: "Resumes", icon: "FileStack" },
   { href: "/analytics", label: "Analytics", icon: "BarChart3" },
   { href: "/apply-queue", label: "Apply queue", icon: "Bot" },
+  { href: "/portals", label: "Portals", icon: "Plug", roles: ["SUPER_ADMIN", "ADMIN", "RECRUITER"] },
   { href: "/recruiters", label: "Recruiters", icon: "UserCog", roles: ["SUPER_ADMIN", "ADMIN"] },
   { href: "/admin", label: "Admin", icon: "ShieldCheck", roles: ["SUPER_ADMIN", "ADMIN"] },
   { href: "/settings", label: "Settings", icon: "Settings" },
