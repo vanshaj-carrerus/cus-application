@@ -16,8 +16,8 @@ type Body = { candidateId?: string; portal?: string } & (
   | { action: "resume" }
   | { action: "claim"; job: JobResult }
   | { action: "progress"; state: "RUNNING" | "PAUSED"; message: string }
-  | { action: "answers"; job?: JobInfo; request: { action: "lookup"; asked: Array<{ id: string; label: string }> } | { action: "ask"; questions: FormQuestion[]; job?: JobInfo } | { action: "used"; savedIds: string[] } | { action: "needed"; questions: Array<{ label: string; options?: string[] }>; askedOn?: string } }
-  | { action: "result"; job: JobResult; outcome: "APPLIED" | "SKIPPED" | "FAILED"; reason?: string }
+  | { action: "answers"; job?: JobInfo; request: { action: "lookup"; asked: Array<{ id: string; label: string }> } | { action: "ask"; questions: FormQuestion[]; job?: JobInfo } | { action: "used"; savedIds: string[] } | { action: "needed"; questions: Array<{ label: string; options?: string[]; required?: boolean }>; askedOn?: string } }
+  | { action: "result"; job: JobResult; outcome: "APPLIED" | "SKIPPED" | "FAILED" | "NEEDS_HUMAN"; reason?: string; pageUrl?: string }
   | { action: "finish"; state: "DONE" | "STOPPED" | "FAILED"; message: string }
 );
 
@@ -45,7 +45,7 @@ export const POST = withHelperAuth(async (req, { user }) => {
         return NextResponse.json({ ok: true });
 
       case "result":
-        return NextResponse.json(await recordResult(candidateId, user.sub, body.portal, body.job, body.outcome, body.reason));
+        return NextResponse.json(await recordResult(candidateId, user.sub, body.portal, body.job, body.outcome, body.reason, body.pageUrl));
 
       case "finish":
         await finishApply(candidateId, body.portal, body.state, body.message ?? "");

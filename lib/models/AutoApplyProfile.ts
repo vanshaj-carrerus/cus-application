@@ -6,6 +6,12 @@ export interface IAutoApplyProfile extends Document {
   enabled: boolean;
   boards: JobBoard[];
   keywords: string[];
+  /** Other job titles to search when the main ones find nothing. */
+  alternateKeywords: string[];
+  /** "Must" flags: when true the search never drops or changes that part to find more jobs. */
+  titleRequired: boolean;
+  locationRequired: boolean;
+  recentRequired: boolean;
   excludeKeywords: string[];
   locations: string[];
   remotePreference: RemoteType[];
@@ -30,6 +36,10 @@ const AutoApplyProfileSchema = new Schema<IAutoApplyProfile>(
     enabled: { type: Boolean, default: false },
     boards: { type: [String], enum: JOB_BOARDS, default: [] },
     keywords: { type: [String], default: [] },
+    alternateKeywords: { type: [String], default: [] },
+    titleRequired: { type: Boolean, default: false },
+    locationRequired: { type: Boolean, default: false },
+    recentRequired: { type: Boolean, default: false },
     excludeKeywords: { type: [String], default: [] },
     locations: { type: [String], default: [] },
     remotePreference: { type: [String], enum: REMOTE_TYPES, default: [] },

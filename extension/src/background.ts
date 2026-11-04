@@ -194,6 +194,12 @@ interface LinkedInApply {
   tabId: number;
   plan: ApplyPlanData;
   searchIdx: number;
+  /** The search the tab is on now (a looser one when the saved search found nothing), and the looser ones still to try. */
+  active?: SearchSpec;
+  fallbacks: SearchSpec[];
+  /** Every search the run has looked at ("title|city|date step"), and whether any of them showed a job. */
+  tried: string[];
+  foundAny: boolean;
   /** "external": the job's Apply button led to the company's own site; its tabs do the work until they report. */
   stage: "search" | "job" | "external";
   queue: JobCard[];
@@ -206,6 +212,8 @@ interface LinkedInApply {
   /** Tabs opened by the job's Apply button (the company's site and anything it opens). */
   extTabs: number[];
 }
+
+type SearchSpec = { keywords: string; location: string; dateLevel?: number; fallbacks?: SearchSpec[] };
 
 const WATCHDOG = "liApplyWatchdog";
 const STALL_MS = 5 * 60_000;
@@ -258,6 +266,10 @@ async function startLinkedInApply(config: Config, candidateId: string | undefine
     tabId,
     plan,
     searchIdx: retry.length ? -1 : 0,
+    active: retry.length ? undefined : plan.searches[0],
+    fallbacks: retry.length ? [] : [...(plan.searches[0]?.fallbacks ?? [])],
+    tried: [],
+    foundAny: false,
     stage: retry.length ? "job" : "search",
     queue: retry,
     qi: 0,
@@ -288,6 +300,18 @@ async function endLinkedInApply(config: Config, run: LinkedInApply, state: "DONE
 }
 
 /** Moves on to the next job, the next search, or the end. */
+const FALLBACK_PAUSE_MS = 8_000;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const DATE_STEPS = ["recent", "older", "much older", "any date"];
+
+/** What the portal card shows when every search came back empty: the filters that were tried. */
+function noJobsMessage(run: LinkedInApply): string {
+  const parts = run.tried.map((t) => t.split("|"));
+  const uniq = (list: string[]) => [...new Set(list)].filter(Boolean).join(", ");
+  const level = Math.max(0, ...parts.map((p) => Number(p[2]) || 0));
+  return `No jobs found. Filters tried: titles ${uniq(parts.map((p) => p[0])) || "none"}; locations ${uniq(parts.map((p) => p[1] || "anywhere"))}; posted ${level ? `from recent up to ${DATE_STEPS[Math.min(level, 3)]}` : "recently"}. Change the keywords or locations in the profile and Start again.`;
+}
+
 async function advanceLinkedInApply(config: Config, run: LinkedInApply) {
   run.seq += 1;
   await closeExtTabs(run);
@@ -311,22 +335,24 @@ async function advanceLinkedInApply(config: Config, run: LinkedInApply) {
   }
   run.searchIdx += 1;
   if (run.searchIdx >= run.plan.searches.length) {
-    await endLinkedInApply(config, run, "DONE", run.applied ? `Finished. ${run.applied} application(s) sent.` : "Finished. No new matching jobs were found.");
+    await endLinkedInApply(config, run, "DONE", run.applied ? `Finished. ${run.applied} application(s) sent.` : run.foundAny ? "Finished. No new matching jobs were found." : noJobsMessage(run));
     return;
   }
   run.stage = "search";
   run.queue = [];
   run.qi = 0;
+  run.active = run.plan.searches[run.searchIdx];
+  run.fallbacks = [...(run.active?.fallbacks ?? [])];
   await saveRun(run);
   await chrome.tabs.update(run.tabId, { url: searchUrl(run.portal, run.plan.searches[run.searchIdx]) });
 }
 
 /** Records how the current job ended, then goes on to the next one (or stops, if asked to, at the run's target, or at today's cap). */
-async function completeJob(config: Config, run: LinkedInApply, outcome: string, reason?: string, company?: string) {
+async function completeJob(config: Config, run: LinkedInApply, outcome: string, reason?: string, company?: string, pageUrl?: string) {
   const job = { ...run.queue[run.qi], company: company || run.queue[run.qi].company };
   let verdict = { stop: false, remaining: 1 };
   try {
-    verdict = await applyPost<{ stop: boolean; remaining: number }>(config, run, { action: "result", job, outcome, reason });
+    verdict = await applyPost<{ stop: boolean; remaining: number }>(config, run, { action: "result", job, outcome, reason, pageUrl });
   } catch (err) {
     await endLinkedInApply(config, run, "FAILED", err instanceof Error ? err.message : "Could not record the result");
     return;
@@ -338,6 +364,9 @@ async function completeJob(config: Config, run: LinkedInApply, outcome: string, 
   run.qi += 1;
   await advanceLinkedInApply(config, run);
 }
+
+/** The job title from the candidate's auto-apply profile (the keyword of the search this run is on). */
+const desiredTitleOf = (run: LinkedInApply) => run.active?.keywords ?? run.plan.searches[Math.max(run.searchIdx, 0)]?.keywords ?? run.plan.searches[0]?.keywords;
 
 async function handleLinkedInApply(message: Record<string, unknown>, sender: chrome.runtime.MessageSender, config: Config): Promise<unknown> {
   const tabId = sender.tab?.id;
@@ -352,10 +381,11 @@ async function handleLinkedInApply(message: Record<string, unknown>, sender: chr
 
   switch (message.type) {
     case "liApplyTask":
-      if (run.stage === "external") return { kind: "external", seq: run.seq, job: run.queue[run.qi], candidate: run.plan.candidate };
+      // `own`: the run's own job tab (it waits); any other tab was opened by the Apply button and has to carry on.
+      if (run.stage === "external") return { kind: "external", seq: run.seq, job: run.queue[run.qi], candidate: run.plan.candidate, own: tabId === run.tabId, desiredTitle: desiredTitleOf(run) };
       if (tabId !== run.tabId) return null;
       if (run.stage === "search") return { kind: "search", seq: run.seq };
-      return { kind: "job", seq: run.seq, job: run.queue[run.qi], candidate: run.plan.candidate, delayMs: run.delayMs };
+      return { kind: "job", seq: run.seq, job: run.queue[run.qi], candidate: run.plan.candidate, delayMs: run.delayMs, desiredTitle: desiredTitleOf(run) };
 
     case "liApplyProgress":
       await chrome.storage.session.set({ [pausedKey(run.id)]: message.state === "PAUSED" });
@@ -409,6 +439,21 @@ async function handleLinkedInApply(message: Record<string, unknown>, sender: chr
         const jobs = (Array.isArray(message.jobs) ? (message.jobs as JobCard[]) : []).filter((j) => !done.has(j.id) && !exclude.some((k) => j.title.toLowerCase().includes(k)));
         // The long applications (on the company's own site) come first; Easy Apply ones after.
         jobs.sort((a, b) => Number(!!a.easy) - Number(!!b.easy));
+        run.tried.push(`${run.active?.keywords ?? ""}|${run.active?.location ?? ""}|${run.active?.dateLevel ?? 0}`);
+        if (Array.isArray(message.jobs) && message.jobs.length > 0) run.foundAny = true;
+        // Nothing new here: loosen the search (city, then other titles, then the date filter, never a part marked "must") and read again.
+        let next = jobs.length === 0 ? run.fallbacks.shift() : undefined;
+        // A step that lands on the very same page (a portal with fewer date choices) is skipped.
+        while (next && run.active && searchUrl(run.portal, next) === searchUrl(run.portal, run.active)) next = run.fallbacks.shift();
+        if (next) {
+          run.active = next;
+          run.seq += 1;
+          await saveRun(run);
+          await applyPost(config, run, { action: "progress", state: "RUNNING", message: `Nothing found, trying "${next.keywords}"${next.location ? ` in ${next.location}` : " anywhere"}${next.dateLevel ? ", older jobs" : ""}` }).catch(() => undefined);
+          await sleep(FALLBACK_PAUSE_MS); // not too fast: a pause so the portal is not hit with searches one after another
+          await chrome.tabs.update(run.tabId, { url: searchUrl(run.portal, next) });
+          return { ok: true };
+        }
         run.seen.push(...jobs.map((j) => j.id));
         run.queue = jobs;
         run.qi = 0;
@@ -416,7 +461,7 @@ async function handleLinkedInApply(message: Record<string, unknown>, sender: chr
         return { ok: true };
       }
 
-      await completeJob(config, run, String(message.outcome), typeof message.reason === "string" ? message.reason : undefined, typeof message.company === "string" ? message.company : undefined);
+      await completeJob(config, run, String(message.outcome), typeof message.reason === "string" ? message.reason : undefined, typeof message.company === "string" ? message.company : undefined, typeof message.pageUrl === "string" ? message.pageUrl : undefined);
       return { ok: true };
     }
   }

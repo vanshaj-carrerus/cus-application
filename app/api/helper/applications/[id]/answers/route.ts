@@ -14,7 +14,7 @@ type Body =
   | { action: "lookup"; asked: Array<{ id: string; label: string }> }
   | { action: "ask"; questions: FormQuestion[]; job?: JobInfo; coverLetter?: string }
   | { action: "used"; savedIds: string[] }
-  | { action: "needed"; questions: Array<{ label: string; options?: string[] }>; askedOn?: string };
+  | { action: "needed"; questions: Array<{ label: string; options?: string[]; required?: boolean }>; askedOn?: string };
 
 /**
  * The server-side half of form answering for the helper: saved answers, the AI model, and recording questions a

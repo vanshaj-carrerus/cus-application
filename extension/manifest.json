@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CUS Assist",
-  "version": "1.8.1",
+  "version": "1.11.0",
   "description": "Helps your recruiting team fill in job applications. You do the clicking and submitting; CUS Assist fills in the forms.",
   "permissions": [
     "storage",
@@ -31,7 +31,16 @@
         "https://*.glassdoor.co.in/*",
         "https://*.glassdoor.co.uk/*",
         "https://*.glassdoor.ca/*",
-        "https://*.glassdoor.com.au/*"
+        "https://*.glassdoor.com.au/*",
+        "https://*.indeed.com/*",
+        "https://*.indeed.co.in/*",
+        "https://*.indeed.co.uk/*",
+        "https://*.indeed.ca/*",
+        "https://*.indeed.com.au/*",
+        "https://*.ziprecruiter.com/*",
+        "https://*.ziprecruiter.co.uk/*",
+        "https://*.ziprecruiter.ca/*",
+        "https://*.naukri.com/*"
       ],
       "js": [
         "main-world.js"

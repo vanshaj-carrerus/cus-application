@@ -66,6 +66,10 @@ interface AutoApplyProfileData {
   enabled: boolean;
   boards: string[];
   keywords: string[];
+  alternateKeywords: string[];
+  titleRequired: boolean;
+  locationRequired: boolean;
+  recentRequired: boolean;
   excludeKeywords: string[];
   locations: string[];
   dailyApplyLimit: number;
@@ -87,6 +91,10 @@ const EMPTY_PROFILE: AutoApplyProfileData = {
   enabled: false,
   boards: [],
   keywords: [],
+  alternateKeywords: [],
+  titleRequired: false,
+  locationRequired: false,
+  recentRequired: false,
   excludeKeywords: [],
   locations: [],
   dailyApplyLimit: 10,
@@ -112,7 +120,7 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
   const [profileId, setProfileId] = useState<string | null>(null);
   // The comma-separated fields are edited as raw text and only split into lists on save. Deriving the
   // input's value from the parsed list on every keystroke strips the trailing comma/space you just typed.
-  const [listText, setListText] = useState({ keywords: "", excludeKeywords: "", locations: "" });
+  const [listText, setListText] = useState({ keywords: "", alternateKeywords: "", excludeKeywords: "", locations: "" });
   const [savingProfile, setSavingProfile] = useState(false);
   const [ingesting, setIngesting] = useState(false);
   const [ingestMessage, setIngestMessage] = useState<string | null>(null);
@@ -147,6 +155,10 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
         enabled: profileData.profile.enabled,
         boards: profileData.profile.boards ?? [],
         keywords: profileData.profile.keywords ?? [],
+        alternateKeywords: profileData.profile.alternateKeywords ?? [],
+        titleRequired: !!profileData.profile.titleRequired,
+        locationRequired: !!profileData.profile.locationRequired,
+        recentRequired: !!profileData.profile.recentRequired,
         excludeKeywords: profileData.profile.excludeKeywords ?? [],
         locations: profileData.profile.locations ?? [],
         dailyApplyLimit: profileData.profile.dailyApplyLimit ?? 10,
@@ -155,6 +167,7 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
       });
       setListText({
         keywords: joinList(profileData.profile.keywords),
+        alternateKeywords: joinList(profileData.profile.alternateKeywords),
         excludeKeywords: joinList(profileData.profile.excludeKeywords),
         locations: joinList(profileData.profile.locations),
       });
@@ -242,6 +255,7 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
         body: JSON.stringify({
           ...profile,
           keywords: splitList(listText.keywords),
+          alternateKeywords: splitList(listText.alternateKeywords),
           excludeKeywords: splitList(listText.excludeKeywords),
           locations: splitList(listText.locations),
         }),
@@ -253,6 +267,7 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
         setProfile((p) => ({ ...p, keywords: data.profile.keywords ?? [], excludeKeywords: data.profile.excludeKeywords ?? [], locations: data.profile.locations ?? [] }));
         setListText({
           keywords: joinList(data.profile.keywords),
+          alternateKeywords: joinList(data.profile.alternateKeywords),
           excludeKeywords: joinList(data.profile.excludeKeywords),
           locations: joinList(data.profile.locations),
         });
@@ -711,6 +726,28 @@ export default function CandidateDetailPage({ params }: { params: Promise<{ id: 
               onChange={(e) => setListText((t) => ({ ...t, keywords: e.target.value }))}
               placeholder="senior react developer"
             />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-medium text-slate-600">Other job titles (comma-separated, tried when the keywords above find nothing)</label>
+            <Input value={listText.alternateKeywords} onChange={(e) => setListText((t) => ({ ...t, alternateKeywords: e.target.value }))} placeholder="full stack engineer, software engineer, web developer" />
+          </div>
+          <div className="rounded-md border border-slate-200 p-3">
+            <div className="mb-2 text-xs font-medium text-slate-600">When a search finds no jobs, the automation loosens it step by step. Tick what must never change:</div>
+            <div className="flex flex-col gap-1.5 text-sm text-slate-700">
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={profile.titleRequired} onChange={(e) => setProfile((p) => ({ ...p, titleRequired: e.target.checked }))} />
+                Job title is a must (never search other titles)
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={profile.locationRequired} onChange={(e) => setProfile((p) => ({ ...p, locationRequired: e.target.checked }))} />
+                Location is a must (never drop the city)
+              </label>
+              <label className="flex items-center gap-2">
+                <input type="checkbox" checked={profile.recentRequired} onChange={(e) => setProfile((p) => ({ ...p, recentRequired: e.target.checked }))} />
+                Recently posted is a must (never widen the date)
+              </label>
+            </div>
+            <div className="mt-2 text-xs text-slate-500">Order tried: drop the city, then other titles, then any date. Unticked parts are changed in that order.</div>
           </div>
           <div>
             <label className="mb-1 block text-xs font-medium text-slate-600">Exclude keywords (comma-separated)</label>

@@ -26,8 +26,16 @@ export interface ApplyJobCard {
   url?: string;
 }
 
+export interface SearchSpec {
+  keywords: string;
+  location: string;
+  /** How far back to look: 0 the normal recent window, 1 and 2 progressively older, 3 any date. Each portal maps it to its own filter. */
+  dateLevel?: number;
+}
+
 export interface ApplyPlan {
-  searches: Array<{ keywords: string; location: string }>;
+  /** Each search carries the looser searches to try, in order, when it finds nothing. */
+  searches: Array<SearchSpec & { fallbacks?: SearchSpec[] }>;
   /** Applications this run sends before it finishes. */
   runTarget: number;
   /** Applications left under today's cap. */
@@ -49,6 +57,34 @@ const startOfToday = () => {
   return d;
 };
 
+const MAX_FALLBACKS = 16;
+
+/**
+ * The looser searches to try when this one finds nothing, least important change first: older jobs (the date filter widens
+ * a step at a time), then without the city, then other job titles (with, then without the city). A part marked "must" in the
+ * profile is never changed.
+ */
+export function fallbackSearches(s: SearchSpec, profile: { alternateKeywords?: string[]; titleRequired?: boolean; locationRequired?: boolean; recentRequired?: boolean }): SearchSpec[] {
+  const out: SearchSpec[] = [];
+  const add = (keywords: string, location: string, dateLevel: number) => {
+    if (keywords === s.keywords && location === s.location && dateLevel === 0) return; // the search itself
+    if (!out.some((o) => o.keywords === keywords && o.location === location && (o.dateLevel ?? 0) === dateLevel)) out.push({ keywords, location, ...(dateLevel ? { dateLevel } : {}) });
+  };
+  const widerDates = profile.recentRequired ? [] : [1, 2, 3];
+  const canDropCity = !!s.location && !profile.locationRequired;
+  const alternates = profile.titleRequired ? [] : (profile.alternateKeywords ?? []).map((t) => t.trim()).filter((t) => t && t.toLowerCase() !== s.keywords.toLowerCase());
+
+  for (const level of widerDates) add(s.keywords, s.location, level); // same search, older jobs
+  if (canDropCity) for (const level of [0, ...widerDates]) add(s.keywords, "", level); // no city
+  for (const title of alternates) {
+    for (const level of [0, ...widerDates.slice(0, 1)]) {
+      add(title, s.location, level);
+      if (canDropCity) add(title, "", level);
+    }
+  }
+  return out.slice(0, MAX_FALLBACKS);
+}
+
 /** Everything a Start run needs, or a PortalSyncError saying what to set up first. Also opens the run record. */
 export async function planApply(candidateId: string, portal: string): Promise<ApplyPlan> {
   if (!getPortal(portal)?.autoApply) throw new PortalSyncError("Auto-apply isn't available for this portal yet");
@@ -56,7 +92,11 @@ export async function planApply(candidateId: string, portal: string): Promise<Ap
 
   const [candidate, profile] = await Promise.all([Candidate.findById(candidateId), AutoApplyProfile.findOne({ candidateId })]);
   if (!candidate) throw new PortalSyncError("Candidate not found", 404);
-  if (!profile || profile.keywords.length === 0) throw new PortalSyncError("Add search keywords in the candidate's Auto-apply settings first.", 409);
+  const clean = (list: string[] | undefined) => [...new Set((list ?? []).map((t) => t.trim()).filter(Boolean))];
+  // The candidate's own profile (My Profile) decides what to search for; the auto-apply settings fill in what it leaves empty.
+  const roles = clean(candidate.preferredRoles);
+  const titles = roles.length ? roles : clean(profile?.keywords);
+  if (!profile || titles.length === 0) throw new PortalSyncError("Add the preferred roles in the candidate's profile (or search keywords in Auto-apply settings) first.", 409);
 
   if (profile.appliedTodayResetAt < startOfToday()) {
     profile.appliedToday = 0;
@@ -67,8 +107,16 @@ export async function planApply(candidateId: string, portal: string): Promise<Ap
   if (leftToday <= 0) throw new PortalSyncError(`The daily limit of ${dailyCap(profile.dailyApplyLimit)} applications has been reached. It resets tomorrow.`, 409);
   const remaining = leftToday;
 
-  const locations = profile.locations.length ? profile.locations : [""];
-  const searches = profile.keywords.flatMap((keywords) => locations.map((location) => ({ keywords, location }))).slice(0, MAX_SEARCHES);
+  const preferred = clean(candidate.preferredLocations);
+  const mine = preferred.length ? preferred : clean(candidate.location ? [candidate.location] : []);
+  const chosen = mine.length ? mine : clean(profile.locations ?? []);
+  const locations = chosen.length ? chosen : [""];
+  // Other titles to try when these find nothing: the auto-apply keywords and alternates that are not already being searched.
+  const alternateKeywords = clean([...(roles.length ? (profile.keywords ?? []) : []), ...(profile.alternateKeywords ?? [])]).filter((t) => !titles.some((x) => x.toLowerCase() === t.toLowerCase()));
+  const searches = titles
+    .flatMap((keywords) => locations.map((location) => ({ keywords, location })))
+    .slice(0, MAX_SEARCHES)
+    .map((s) => ({ ...s, fallbacks: fallbackSearches(s, { ...profile.toObject(), alternateKeywords }) }));
 
   // Unfinished applications come first; everything else the candidate already has (sent or queued) is never searched for again.
   const [apps, unfinished] = await Promise.all([
@@ -131,7 +179,7 @@ export async function finishApply(candidateId: string, portal: string, state: "D
   }
   await PortalSnapshot.updateOne(
     { candidateId, portal, "apply.state": { $exists: true } },
-    { $set: { "apply.state": state, "apply.message": message.slice(0, 300), "apply.finishedAt": new Date() } }
+    { $set: { "apply.state": state, "apply.message": message.slice(0, 600), "apply.finishedAt": new Date() } }
   );
 }
 
@@ -163,15 +211,48 @@ export interface JobResult {
 }
 
 /** Records what happened to one job. Returns whether the run should stop and how many applications are left today. */
-export async function recordResult(candidateId: string, userId: string, portal: string, job: JobResult, outcome: string, reason?: string) {
+export async function recordResult(candidateId: string, userId: string, portal: string, job: JobResult, outcome: string, reason?: string, pageUrl?: string) {
   const title = (job.title || "Untitled job").slice(0, 300);
   const company = job.company?.slice(0, 200);
 
-  const candidate = outcome === "APPLIED" || outcome === "FAILED" ? await Candidate.findById(candidateId).select("assignedRecruiterId") : null;
+  const candidate = outcome === "APPLIED" || outcome === "FAILED" || outcome === "NEEDS_HUMAN" ? await Candidate.findById(candidateId).select("assignedRecruiterId") : null;
   const now = new Date();
   const portalName = getPortal(portal)?.name ?? portal;
 
-  if (outcome === "APPLIED" || outcome === "FAILED") {
+  if (outcome === "FAILED") {
+    // A job that did not go through leaves no Application behind, so nothing shows as a draft. Only an Application that already
+    // exists (from an earlier run) keeps the reason and attempt count, so it can be retried; the next search finds new failures again.
+    const jobDoc = await Job.findOne({ source: portal, externalJobId: job.id }).select("_id");
+    const existing = jobDoc ? await Application.findOne({ candidateId, jobId: jobDoc._id }).select("status") : null;
+    if (jobDoc && existing && existing.status !== "APPLIED") {
+      await Application.updateOne({ _id: existing._id }, { $set: { automationStatus: "FAILED", failureReason: (reason ?? "Not finished").slice(0, 500) }, $inc: { "confirmationData.attempts": 1 } });
+    }
+  }
+
+  if (outcome === "NEEDS_HUMAN") {
+    // A person has to do something (sign in, answer a question, fix a step). The application is kept as a draft that says so,
+    // and the candidate can retry it from My Applications once it is sorted out.
+    const url = job.url?.slice(0, 500);
+    const jobDoc = await Job.findOneAndUpdate(
+      { source: portal, externalJobId: job.id },
+      { $setOnInsert: { title, company: company || "Unknown company", description: `Found through ${portalName}. The posting text was not stored.`, location: job.location?.slice(0, 200), applicationUrl: url, sourceUrl: url, status: "ACTIVE" } },
+      { upsert: true, new: true }
+    );
+    if (company && jobDoc.company === "Unknown company") await Job.updateOne({ _id: jobDoc._id }, { $set: { company } });
+    const already = await Application.findOne({ candidateId, jobId: jobDoc._id }).select("status");
+    if (already?.status !== "APPLIED") {
+      await Application.updateOne(
+        { candidateId, jobId: jobDoc._id },
+        {
+          $set: { automationStatus: "AWAITING_REVIEW", failureReason: `Needs a person: ${(reason ?? "this step").slice(0, 450)}` },
+          $setOnInsert: { recruiterId: candidate?.assignedRecruiterId ?? userId, status: "DRAFT" },
+        },
+        { upsert: true }
+      );
+    }
+  }
+
+  if (outcome === "APPLIED") {
     const url = job.url?.slice(0, 500);
     const jobDoc = await Job.findOneAndUpdate(
       { source: portal, externalJobId: job.id },
@@ -180,32 +261,18 @@ export async function recordResult(candidateId: string, userId: string, portal: 
     );
     // A company name learned later replaces the placeholder.
     if (company && jobDoc.company === "Unknown company") await Job.updateOne({ _id: jobDoc._id }, { $set: { company } });
-    const existing = await Application.findOne({ candidateId, jobId: jobDoc._id }).select("status");
-
-    if (outcome === "APPLIED") {
-      await Application.updateOne(
-        { candidateId, jobId: jobDoc._id },
-        {
-          $set: { status: "APPLIED", appliedAt: now, appliedBy: userId, automationStatus: "SUBMITTED" },
-          $unset: { failureReason: "" },
-          $setOnInsert: { recruiterId: candidate?.assignedRecruiterId ?? userId },
-          $push: { timeline: { status: "APPLIED", note: `Applied automatically on ${portalName}`, changedAt: now } },
-        },
-        { upsert: true }
-      );
-      await AutoApplyProfile.updateOne({ candidateId }, { $inc: { appliedToday: 1 }, $set: { lastRunAt: now } });
-    } else if (existing?.status !== "APPLIED") {
-      // Not finished: kept (with the reason) so the next Start picks it up first.
-      await Application.updateOne(
-        { candidateId, jobId: jobDoc._id },
-        {
-          $set: { automationStatus: "FAILED", failureReason: (reason ?? "Not finished").slice(0, 500) },
-          $inc: { "confirmationData.attempts": 1 },
-          $setOnInsert: { recruiterId: candidate?.assignedRecruiterId ?? userId, status: "DRAFT" },
-        },
-        { upsert: true }
-      );
-    }
+    // The Application is only created here, once the application has really gone through.
+    await Application.updateOne(
+      { candidateId, jobId: jobDoc._id },
+      {
+        $set: { status: "APPLIED", appliedAt: now, appliedBy: userId, automationStatus: "SUBMITTED", ...(pageUrl && /^https?:/i.test(pageUrl) ? { "confirmationData.submittedUrl": pageUrl.slice(0, 800) } : {}) },
+        $unset: { failureReason: "" },
+        $setOnInsert: { recruiterId: candidate?.assignedRecruiterId ?? userId },
+        $push: { timeline: { status: "APPLIED", note: `Applied automatically on ${portalName}`, changedAt: now } },
+      },
+      { upsert: true }
+    );
+    await AutoApplyProfile.updateOne({ candidateId }, { $inc: { appliedToday: 1 }, $set: { lastRunAt: now } });
   }
 
   if (outcome !== "APPLIED") await PortalJobClaim.deleteOne({ candidateId, portal, externalJobId: job.id });

@@ -78,18 +78,22 @@ export function looksLikeFieldId(label: string): boolean {
  * Remember required questions the bot could not answer, so a person answers each ONCE. Never overwrites an existing
  * row (an ANSWERED one stays as it is); a NEEDED one just keeps its first-seen details.
  */
-export async function recordNeededQuestions(candidateId: Types.ObjectId | string, questions: Array<{ label: string; options?: string[] }>, askedOn?: string): Promise<number> {
+export async function recordNeededQuestions(candidateId: Types.ObjectId | string, questions: Array<{ label: string; options?: string[]; required?: boolean }>, askedOn?: string): Promise<number> {
   let created = 0;
   for (const q of questions) {
     const questionKey = normalizeQuestion(q.label);
     if (!questionKey || questionKey.length < 4 || looksLikeFieldId(q.label)) continue;
     const exists = await SavedAnswer.exists({ candidateId, questionKey });
-    if (exists) continue;
+    if (exists) {
+      // Seen again as required: it is now marked required (never the other way round).
+      if (q.required) await SavedAnswer.updateOne({ candidateId, questionKey, status: "NEEDED" }, { $set: { required: true } });
+      continue;
+    }
     // A close wording of something already answered is covered by lookup; don't ask the person twice.
     const answered = await SavedAnswer.find({ candidateId, status: "ANSWERED" }).select("questionKey").lean();
     if (answered.some((r) => similar(questionKey, r.questionKey))) continue;
     try {
-      await SavedAnswer.create({ candidateId, questionKey, question: q.label.trim().slice(0, 400), answer: "", status: "NEEDED", source: "BOT", options: q.options?.length ? q.options.slice(0, 60) : undefined, askedOn });
+      await SavedAnswer.create({ candidateId, questionKey, question: q.label.trim().slice(0, 400), answer: "", status: "NEEDED", source: "BOT", options: q.options?.length ? q.options.slice(0, 60) : undefined, required: !!q.required, askedOn });
       created++;
     } catch (err) {
       if ((err as { code?: number }).code !== 11000) throw err; // lost a race with another run — fine

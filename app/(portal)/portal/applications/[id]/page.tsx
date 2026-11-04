@@ -11,7 +11,9 @@ interface ApplicationDetail {
   status: string;
   coverLetter?: string;
   applicationProofScreenshot?: string;
-  jobId?: { title: string; company: string; location?: string };
+  appliedAt?: string;
+  confirmationData?: { submittedUrl?: string };
+  jobId?: { title: string; company: string; location?: string; source?: string; applicationUrl?: string; sourceUrl?: string };
   resumeVersionId?: { label: string; fileUrl?: string };
   timeline: { status?: string; note?: string; changedAt: string }[];
 }
@@ -46,8 +48,48 @@ export default function PortalApplicationDetailPage({ params }: { params: Promis
         </CardHeader>
         <CardContent>
           <Badge variant="info">{app.status.replace(/_/g, " ")}</Badge>
+          <dl className="mt-3 grid gap-1 text-sm text-slate-700">
+            {app.jobId?.source && (
+              <div>
+                <dt className="inline text-slate-500">Portal: </dt>
+                <dd className="inline">{app.jobId.source.charAt(0) + app.jobId.source.slice(1).toLowerCase()}</dd>
+              </div>
+            )}
+            {app.appliedAt && (
+              <div>
+                <dt className="inline text-slate-500">Applied on: </dt>
+                <dd className="inline">{new Date(app.appliedAt).toLocaleString()}</dd>
+              </div>
+            )}
+          </dl>
         </CardContent>
       </Card>
+
+      {(app.confirmationData?.submittedUrl || app.jobId?.applicationUrl || app.jobId?.sourceUrl) && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Application page</CardTitle>
+          </CardHeader>
+          <CardContent className="flex flex-col gap-2 text-sm">
+            {app.confirmationData?.submittedUrl && (
+              <div>
+                <div className="text-xs text-slate-500">The page the application was submitted on</div>
+                <a className="break-all text-blue-700 underline" href={app.confirmationData.submittedUrl} target="_blank" rel="noreferrer">
+                  {app.confirmationData.submittedUrl}
+                </a>
+              </div>
+            )}
+            {(app.jobId?.applicationUrl || app.jobId?.sourceUrl) && (
+              <div>
+                <div className="text-xs text-slate-500">The job posting</div>
+                <a className="break-all text-blue-700 underline" href={(app.jobId?.applicationUrl || app.jobId?.sourceUrl) as string} target="_blank" rel="noreferrer">
+                  {app.jobId?.applicationUrl || app.jobId?.sourceUrl}
+                </a>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {app.resumeVersionId?.fileUrl && (
         <Card>

@@ -21,12 +21,12 @@ export interface PortalDef {
 
 export const PORTAL_CATALOG: PortalDef[] = [
   { id: "LINKEDIN", name: "LinkedIn", regions: ["GLOBAL"], loginUrl: "https://www.linkedin.com/login", loginLabel: "Email or phone", extensionSync: true, autoApply: true, profileUrlRequired: true, note: "Reads your profile, messages and jobs, and applies to jobs, all from your own signed-in browser" },
-  { id: "INDEED", name: "Indeed", regions: ["GLOBAL", "USA", "INDIA"], loginUrl: "https://secure.indeed.com/auth", loginLabel: "Email", note: "Indeed signs in with an emailed code by default" },
-  { id: "NAUKRI", name: "Naukri", regions: ["INDIA"], loginUrl: "https://www.naukri.com/nlogin/login", loginLabel: "Email or username" },
+  { id: "INDEED", name: "Indeed", regions: ["GLOBAL", "USA", "INDIA"], loginUrl: "https://secure.indeed.com/auth", loginLabel: "Email", autoApply: true, loginInBrowser: true, note: "Searches and applies (Indeed's own form and company sites) from your own signed-in browser" },
+  { id: "NAUKRI", name: "Naukri", regions: ["INDIA"], loginUrl: "https://www.naukri.com/nlogin/login", loginLabel: "Email or username" , autoApply: true, loginInBrowser: true, note: "Searches and applies (Naukri apply and company sites) from your own signed-in browser" },
   { id: "SIMPLYHIRED", name: "SimplyHired", regions: ["USA"], loginUrl: "https://www.simplyhired.com/account/login", loginLabel: "Email" },
   { id: "JOOBLE", name: "Jooble", regions: ["GLOBAL", "USA", "INDIA"], loginUrl: "https://jooble.org/account/login", loginLabel: "Email" },
   { id: "GLASSDOOR", name: "Glassdoor", regions: ["GLOBAL", "USA"], loginUrl: "https://www.glassdoor.com/profile/login_input.htm", loginLabel: "Email", autoApply: true, loginInBrowser: true, note: "Searches and applies from your own signed-in browser" },
-  { id: "ZIPRECRUITER", name: "ZipRecruiter", regions: ["USA"], loginUrl: "https://www.ziprecruiter.com/authn/login", loginLabel: "Email" },
+  { id: "ZIPRECRUITER", name: "ZipRecruiter", regions: ["USA"], loginUrl: "https://www.ziprecruiter.com/authn/login", loginLabel: "Email", autoApply: true, loginInBrowser: true, note: "Searches and applies (1-Click / Quick Apply and company sites) from your own signed-in browser" },
   { id: "MONSTER", name: "Monster", regions: ["USA", "GLOBAL"], loginUrl: "https://www.monster.com/profile/signin", loginLabel: "Email" },
   { id: "DICE", name: "Dice", regions: ["USA"], loginUrl: "https://www.dice.com/dashboard/login", loginLabel: "Email" },
   { id: "CAREERBUILDER", name: "CareerBuilder", regions: ["USA"], loginUrl: "https://www.careerbuilder.com/login", loginLabel: "Email" },
