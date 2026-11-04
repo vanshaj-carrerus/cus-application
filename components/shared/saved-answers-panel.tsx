@@ -15,6 +15,7 @@ interface Answer {
   source: "STAFF" | "CANDIDATE" | "BOT";
   options?: string[];
   askedOn?: string;
+  required?: boolean;
   timesUsed: number;
 }
 
@@ -91,7 +92,10 @@ export function SavedAnswersPanel({ baseUrl, retryUrl, audience }: { baseUrl: st
                 <div className="text-sm font-medium text-amber-900">{needed.length} question{needed.length > 1 ? "s" : ""} waiting for an answer</div>
                 {needed.map((a) => (
                   <div key={a._id} className="flex flex-col gap-1.5">
-                    <div className="text-sm text-slate-900">{a.question}</div>
+                    <div className="text-sm text-slate-900">
+                      {a.question}{" "}
+                      <span className={`ml-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${a.required ? "bg-red-100 text-red-700" : "bg-slate-200 text-slate-600"}`}>{a.required ? "Required" : "Optional"}</span>
+                    </div>
                     {a.askedOn && <div className="text-xs text-slate-500">Asked on {a.askedOn}</div>}
                     <div className="flex gap-2">
                       {a.options?.length ? (
@@ -109,7 +113,7 @@ export function SavedAnswersPanel({ baseUrl, retryUrl, audience }: { baseUrl: st
                       <Button size="sm" disabled={!drafts[a._id]?.trim() || busy === a._id} onClick={() => run(a._id, () => call(`${baseUrl}/${a._id}`, { method: "PATCH", body: JSON.stringify({ answer: drafts[a._id] }) }))}>
                         {busy === a._id ? "Saving…" : "Save"}
                       </Button>
-                      <Button size="sm" variant="ghost" disabled={busy === a._id} title="This question doesn't apply — remove it" onClick={() => run(a._id, () => call(`${baseUrl}/${a._id}`, { method: "DELETE" }))}>
+                      <Button size="sm" variant="ghost" disabled={busy === a._id} title={a.required ? "This question doesn't apply: remove it" : "Optional: skip it, applications go on without an answer"} onClick={() => run(a._id, () => call(`${baseUrl}/${a._id}`, { method: "DELETE" }))}>
                         Skip
                       </Button>
                     </div>
@@ -144,7 +148,10 @@ export function SavedAnswersPanel({ baseUrl, retryUrl, audience }: { baseUrl: st
                 {done.map((a) => (
                   <li key={a._id} className="flex items-start justify-between gap-3 py-2">
                     <div className="min-w-0">
-                      <div className="text-sm text-slate-900">{a.question}</div>
+                      <div className="text-sm text-slate-900">
+                      {a.question}{" "}
+                      <span className={`ml-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${a.required ? "bg-red-100 text-red-700" : "bg-slate-200 text-slate-600"}`}>{a.required ? "Required" : "Optional"}</span>
+                    </div>
                       <div className="mt-0.5 break-words text-sm text-slate-600">{a.answer}</div>
                       <div className="mt-0.5 flex gap-2 text-xs text-slate-400">
                         <span>{a.source === "CANDIDATE" ? "by the candidate" : a.source === "STAFF" ? "by a recruiter" : "by the bot"}</span>

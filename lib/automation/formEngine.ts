@@ -390,7 +390,7 @@ export interface AnswerBackend {
   lookupSaved(asked: Array<{ id: string; label: string }>): Promise<Map<string, { answer: string; savedId: string }>>;
   askModel(questions: FormQuestion[], job: JobInfo, coverLetter?: string): Promise<ModelAnswer[]>;
   markUsed(savedIds: string[]): Promise<void>;
-  recordNeeded(questions: Array<{ label: string; options?: string[] }>, askedOn?: string): Promise<number>;
+  recordNeeded(questions: Array<{ label: string; options?: string[]; required?: boolean }>, askedOn?: string): Promise<number>;
 }
 
 /* ── 4. Validate, then fill ───────────────────────────────────────────── */
@@ -776,7 +776,7 @@ export async function runQuestions(job: JobInfo, coverLetter: string | undefined
   for (const [id, hit] of saved) byId.set(id, { id, answer: hit.answer });
 
   const usedSaved: string[] = [];
-  const needed: Array<{ label: string; options?: string[] }> = [];
+  const needed: Array<{ label: string; options?: string[]; required?: boolean }> = [];
   const ANSWERABLE_BY_PERSON = /the profile doesn't say|not one of the form's options|no matching options|not answerable from the profile/;
 
   for (const question of questions) {
@@ -787,7 +787,7 @@ export async function runQuestions(job: JobInfo, coverLetter: string | undefined
       if (question.required) result.requiredMissing.push(question.label || "(unlabelled required field)");
       // Every question the profile can't answer is saved for the candidate to answer once (required or not), so the next form that asks it is answered.
       if (ANSWERABLE_BY_PERSON.test(planned.skip) && question.label) {
-        needed.push({ label: question.label, options: question.options });
+        needed.push({ label: question.label, options: question.options, required: question.required });
         result.needsPerson.push(question.label);
       }
       continue;
@@ -824,6 +824,8 @@ export function summarizeQuestionResult(r: QuestionResult): string {
 /** A short description of why this page is the employer's "application received" page, or null. Only a positive signal counts. */
 export function submissionEvidence(): string | null {
   const url = location.href.toLowerCase();
+  // WordPress Contact Form 7 (and look-alikes) mark the form itself as sent.
+  if (document.querySelector(".wpcf7 form.sent, .wpcf7-mail-sent-ok, form.wpcf7-form.sent")) return "form marked as sent";
   if (/greenhouse\.io/.test(url) && /\/confirmation\b/.test(url)) return "Greenhouse confirmation page";
   if (/lever\.co/.test(url) && /\/thanks\b/.test(url)) return "Lever confirmation page";
   if (/thank|confirmation|success|submitted|complete/.test(url)) {
@@ -834,4 +836,4 @@ export function submissionEvidence(): string | null {
   return CONFIRMATION_TEXT.test(document.body?.innerText ?? "") ? "confirmation page" : null;
 }
 
-const CONFIRMATION_TEXT = /thank you for (applying|your application|your interest)|application (has been |was |is )?(received|submitted|complete)|we('ve| have) received your application|(your application (has been )?)?submitted successfully/i;
+const CONFIRMATION_TEXT = /thank you for (applying|your application|your interest)|application (has been |was |is )?(received|submitted|complete)|we('ve| have) received your application|(your application (has been )?)?submitted successfully|thank you for your (message|submission|enquiry|inquiry)|(your )?(message|form|application|details) (has|have) been (sent|submitted|received)|message (was )?sent successfully/i;

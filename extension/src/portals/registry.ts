@@ -1,6 +1,9 @@
-import { isGlassdoorHost, isLinkedInHost, type ApplyPortal } from "../linkedin-shared";
+import { isGlassdoorHost, isIndeedHost, isLinkedInHost, isNaukriHost, isZipRecruiterHost, type ApplyPortal } from "../linkedin-shared";
 import { runLinkedInApplyIfAsked, type Send } from "../linkedin-apply";
 import { runGlassdoorApplyIfAsked } from "./glassdoor";
+import { runIndeedApplyIfAsked } from "./indeed";
+import { runZipRecruiterApplyIfAsked } from "./ziprecruiter";
+import { runNaukriApplyIfAsked } from "./naukri";
 
 /**
  * One adapter per portal. A page is handed to the adapter of ITS portal and to no other, so a portal's code only ever looks
@@ -17,6 +20,9 @@ interface PortalAdapter {
 const ADAPTERS: PortalAdapter[] = [
   { id: "LINKEDIN", matchesHost: isLinkedInHost, run: runLinkedInApplyIfAsked },
   { id: "GLASSDOOR", matchesHost: isGlassdoorHost, run: runGlassdoorApplyIfAsked },
+  { id: "INDEED", matchesHost: isIndeedHost, run: runIndeedApplyIfAsked },
+  { id: "NAUKRI", matchesHost: isNaukriHost, run: runNaukriApplyIfAsked },
+  { id: "ZIPRECRUITER", matchesHost: isZipRecruiterHost, run: runZipRecruiterApplyIfAsked },
 ];
 
 export async function runPortalApplyIfAsked(send: Send) {

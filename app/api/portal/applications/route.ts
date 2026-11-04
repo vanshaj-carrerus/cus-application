@@ -10,7 +10,7 @@ export const GET = withAuth(async (_req: NextRequest, { user }) => {
 
   await connectDB();
   const applications = await Application.find({ candidateId: user.candidateId })
-    .populate("jobId", "title company location remoteType")
+    .populate("jobId", "title company location remoteType source")
     .sort({ updatedAt: -1 });
   return NextResponse.json({ applications });
 });

@@ -1,5 +1,5 @@
 import type { AssistCandidate } from "../../../lib/automation/formEngine";
-import { isGlassdoorHost, isPortalHost, MAX_JOBS_PER_SEARCH, type ApplyOutcome, type JobCard } from "../linkedin-shared";
+import { isGlassdoorHost, MAX_JOBS_PER_SEARCH, type ApplyOutcome, type JobCard } from "../linkedin-shared";
 import { clean, clearChallenge, deepAll, press, say, sleep, visible, waitFor, type Send } from "../linkedin-apply";
 import { waitForPerson } from "../external-apply";
 
@@ -147,7 +147,7 @@ async function captureOpen(act: () => void, ms: number): Promise<string | null> 
   });
 }
 
-export async function applyOnGlassdoor(job: JobCard, send: Send): Promise<{ outcome: ApplyOutcome | "EXTERNAL"; reason?: string }> {
+export async function applyOnGlassdoor(job: JobCard, send: Send, desiredTitle = job.title): Promise<{ outcome: ApplyOutcome | "EXTERNAL"; reason?: string }> {
   const fail = (reason: string) => ({ outcome: "FAILED" as const, reason });
   const label = `${job.title}${job.company ? ` at ${job.company}` : ""}`;
 
@@ -163,6 +163,35 @@ export async function applyOnGlassdoor(job: JobCard, send: Send): Promise<{ outc
   }
   if (alreadyApplied()) return { outcome: "SKIPPED", reason: "Already applied" };
 
+  await answerPreferencesPrompt(desiredTitle); // it may already be covering the page
+  return handOver(job, findApplyButton() ?? button, send, desiredTitle);
+}
+
+/**
+ * Glassdoor's "You're all set to apply" pop-up, which asks for a desired job title before it lets the application go on.
+ * Fills the field with the candidate's desired title from their auto-apply profile and presses Update. Returns true if the pop-up was there and was answered.
+ */
+async function answerPreferencesPrompt(title: string): Promise<boolean> {
+  const dialog = deepAll<HTMLElement>('[role="dialog"], [data-test*="modal" i], [class*="modal" i]').find((d) => visible(d) && /desired job title/i.test(d.innerText));
+  if (!dialog) return false;
+  const field = deepAll<HTMLInputElement>("input", dialog).find((i) => visible(i) && /text|search|^$/.test(i.type));
+  if (field && title && clean(field.value) !== title) {
+    field.focus();
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(field, title);
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+    field.dispatchEvent(new Event("change", { bubbles: true }));
+    await sleep(400);
+  }
+  const update = deepAll<HTMLElement>("button", dialog).find((b) => visible(b) && /^update$/i.test(clean(b.textContent)));
+  if (!update) return false;
+  press(update);
+  await sleep(1_500);
+  return true;
+}
+
+/** Clicks Apply and gets the employer's site opened in its own tab. Safe to run again: it reports EXTERNAL once a tab exists. */
+async function handOver(job: JobCard, button: HTMLElement, send: Send, desiredTitle: string): Promise<{ outcome: ApplyOutcome | "EXTERNAL"; reason?: string }> {
+  const label = `${job.title}${job.company ? ` at ${job.company}` : ""}`;
   await say(send, `${label}: going to the employer's application`);
   const fromLink = linkBehind(button);
   // Announced before the click, so the tab that opens is recognised as part of this application.
@@ -170,7 +199,14 @@ export async function applyOnGlassdoor(job: JobCard, send: Send): Promise<{ outc
   if (fromLink) return { outcome: "EXTERNAL" };
 
   const before = location.href;
-  const opened = await captureOpen(() => press(button), 6_000);
+  let opened = await captureOpen(() => press(button), 6_000);
+  // The "desired job title" pop-up can come up after the click: answer it, then see if the application went on by itself, else click Apply again.
+  if (!opened && (await answerPreferencesPrompt(desiredTitle))) {
+    await say(send, "Glassdoor asked for a desired job title: answered, continuing", true);
+    if (((await send<{ count: number }>({ type: "liApplyExtCount" }))?.count ?? 0) > 0) return { outcome: "EXTERNAL" };
+    const again = findApplyButton() ?? button;
+    opened = await captureOpen(() => press(again), 6_000);
+  }
   if (opened) {
     await send({ type: "liApplyOpen", url: opened });
     return { outcome: "EXTERNAL" };
@@ -198,7 +234,7 @@ async function leaveGlassdoor(task: { seq: number }, send: Send) {
   await sleep(4_000);
   if (!isGlassdoorHost(location.hostname) || location.href !== here) return;
 
-  const outward = deepAll<HTMLAnchorElement>("a[href]").filter((a) => /^https?:/i.test(a.href) && !isPortalHost(new URL(a.href).hostname) && visible(a));
+  const outward = deepAll<HTMLAnchorElement>("a[href]").filter((a) => /^https?:/i.test(a.href) && !isGlassdoorHost(new URL(a.href).hostname) && visible(a));
   const preferred = outward.find((a) => /apply|continue|company|employer|go to|visit/i.test(clean(a.textContent))) ?? outward[0];
   if (preferred) {
     location.assign(preferred.href);
@@ -210,6 +246,18 @@ async function leaveGlassdoor(task: { seq: number }, send: Send) {
     await sleep(5_000);
     if (!isGlassdoorHost(location.hostname) || location.href !== here) return;
   }
+  // The tab may be the job page again, with its own "Apply on employer site" button: use it, the same way the first tab does.
+  const apply = findApplyButton();
+  if (apply) {
+    const direct = linkBehind(apply);
+    const target = direct ?? (await captureOpen(() => press(apply), 6_000)) ?? applyUrlFromPageData();
+    if (target) {
+      location.assign(target);
+      return;
+    }
+    await sleep(3_000);
+    if (!isGlassdoorHost(location.hostname) || location.href !== here) return;
+  }
   const said = clean(document.body?.innerText).slice(0, 120);
   await send({ type: "liApplyResult", seq: task.seq, kind: "job", outcome: "FAILED", reason: `Glassdoor's page did not lead to the employer's site. It said: "${said}" ${describePage()}` });
 }
@@ -217,13 +265,34 @@ async function leaveGlassdoor(task: { seq: number }, send: Send) {
 /** Content-script entry: if this tab is a Glassdoor run's tab, do the task for this page and report back. */
 export async function runGlassdoorApplyIfAsked(send: Send) {
   if (window !== window.top || !isGlassdoorHost(location.hostname)) return;
-  const task = await send<{ kind: "search" | "job" | "external"; seq: number; job?: JobCard; candidate?: AssistCandidate; delayMs?: number } | null>({ type: "liApplyTask" });
+  const task = await send<{ kind: "search" | "job" | "external"; seq: number; job?: JobCard; candidate?: AssistCandidate; delayMs?: number; own?: boolean; desiredTitle?: string } | null>({ type: "liApplyTask" });
   if (!task?.kind) return;
 
   if (task.kind === "external") {
-    // The run's own job page just waits (the employer's site opens in another tab). Any other Glassdoor page in the chain is passed through.
-    if (!/\/(job-listing|Job)\//i.test(location.pathname)) await leaveGlassdoor(task, send);
-    else await say(send, "waiting for the employer's site (it opens in its own tab)", true);
+    // The run's own job tab just waits (the employer's site opens in another tab). Any other Glassdoor tab was opened by the
+    // Apply button (a redirect page, or the job page again) and has to carry on to the employer itself.
+    if (!task.own) {
+      await leaveGlassdoor(task, send);
+      return;
+    }
+    await say(send, "waiting for the employer's site (it opens in its own tab)", true);
+    // Glassdoor often reloads the job page (into the search page) right after the hand-over was announced, which cuts the first
+    // attempt off before its click. If no employer tab exists a few seconds later, click Apply again from this page.
+    const title = task.desiredTitle ?? task.job?.title ?? "";
+    const tabs = async () => (await send<{ count: number }>({ type: "liApplyExtCount" }))?.count ?? 0;
+    for (let attempt = 0; attempt < 3 && task.job; attempt++) {
+      await sleep(5_000);
+      if ((await tabs()) > 0) return;
+      if (!(await ensureSignedIn(send))) return;
+      if (await answerPreferencesPrompt(title)) continue;
+      const button = findApplyButton();
+      if (!button) continue;
+      await say(send, "clicking Apply on employer site", true);
+      const r = await handOver(task.job, button, send, title);
+      if (r.outcome !== "EXTERNAL") return void (await send({ type: "liApplyResult", seq: task.seq, kind: "job", ...r }));
+      await sleep(4_000);
+      if ((await tabs()) > 0) return;
+    }
     return;
   }
   await say(send, task.kind === "search" ? "reading Glassdoor's search results" : `Glassdoor: ${task.job?.title ?? "job"}`, true);
@@ -236,7 +305,7 @@ export async function runGlassdoorApplyIfAsked(send: Send) {
         await say(send, `next application in ${left}s: ${task.job.title}`, true);
         await sleep(1_000);
       }
-      const r = await applyOnGlassdoor(task.job, send);
+      const r = await applyOnGlassdoor(task.job, send, task.desiredTitle ?? task.job.title);
       if (r.outcome !== "EXTERNAL") await send({ type: "liApplyResult", seq: task.seq, kind: "job", ...r });
     }
   } catch (err) {

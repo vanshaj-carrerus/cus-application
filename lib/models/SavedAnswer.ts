@@ -23,6 +23,8 @@ export interface ISavedAnswer extends Document {
   options?: string[];
   /** Where the bot first ran into it (host), for context. */
   askedOn?: string;
+  /** The form marked the question required (false: optional, so the person can skip it). */
+  required?: boolean;
   timesUsed: number;
   lastUsedAt?: Date;
   createdAt: Date;
@@ -39,6 +41,7 @@ const SavedAnswerSchema = new Schema<ISavedAnswer>(
     source: { type: String, enum: ["STAFF", "CANDIDATE", "BOT"], default: "STAFF" },
     options: { type: [String], default: undefined },
     askedOn: String,
+    required: { type: Boolean, default: false },
     timesUsed: { type: Number, default: 0 },
     lastUsedAt: Date,
   },
